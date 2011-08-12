@@ -1,0 +1,3 @@
+recordTimeSeconds = 100
+videoFileName = C:\Code\imaq\gige_record_x64\out\test1.avi
+nFramesBuffer = 1000
