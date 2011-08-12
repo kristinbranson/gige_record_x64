@@ -555,7 +555,7 @@ ufmfWriter::ufmfWriter(const char * fileName, unsigned __int32 pWidth, unsigned 
 		if(statFileName && strcmp(statFileName,""))
 			stats = new ufmfWriterStats(statFileName, wWidth, wHeight, statStreamPrintFreq, statPrintFrameErrors, statPrintTimings, statComputeFrameErrorFreq, true);
 		else
-			stats = new ufmfWriterStats(logFID, wWidth, wHeight, statStreamPrintFreq, statPrintFrameErrors, statPrintTimings, statComputeFrameErrorFreq, true);
+			stats = new ufmfWriterStats(logger, wWidth, wHeight, statStreamPrintFreq, statPrintFrameErrors, statPrintTimings, statComputeFrameErrorFreq, true);
 	}
 
  }
@@ -597,6 +597,11 @@ ufmfWriter::ufmfWriter(const char * fileName, unsigned __int32 pWidth, unsigned 
 }
 
 bool ufmfWriter::startWrite(){
+
+	ULARGE_INTEGER stats_t0;
+	if(stats){
+		stats_t0 = ufmfWriterStats::getTime();
+	}
 
 	int i;
 
@@ -728,10 +733,19 @@ bool ufmfWriter::startWrite(){
 		return false; 
 	}
 
+	if(stats){
+		stats->updateTimings(UTT_START_WRITING,stats_t0);
+	}
+
 	return true;
 }
 
 unsigned __int64 ufmfWriter::stopWrite(){
+
+	ULARGE_INTEGER stats_t0;
+	if(stats){
+		stats_t0 = ufmfWriterStats::getTime();
+	}
 
 	logger->log(UFMF_DEBUG_3,"Stopping writing\n");
 
@@ -753,6 +767,10 @@ unsigned __int64 ufmfWriter::stopWrite(){
 
 	logger->log(UFMF_DEBUG_3,"Stopped all threads, wrote footer, closed video.\n");
 
+	if(stats){
+		stats->updateTimings(UTT_STOP_WRITE,stats_t0);
+	}
+
 	return nWritten;
 }
 
@@ -761,6 +779,10 @@ bool ufmfWriter::addFrame(unsigned char * frame, double timestamp){
 
 	int bufferIndex;
 	unsigned __int64 frameNumber;
+	ULARGE_INTEGER stats_t0;
+	if(stats){
+		stats_t0 = ufmfWriterStats::getTime();
+	}
 
 	// wait for any uncompressed frame to be empty
 	bufferIndex = (int)WaitForMultipleObjects(nBuffers,uncompressedBufferEmptySemaphores,false,MAXWAITTIMEMS) - (int)WAIT_OBJECT_0;
@@ -779,6 +801,10 @@ bool ufmfWriter::addFrame(unsigned char * frame, double timestamp){
 	nUncompressedFramesBuffered++;
 	Unlock();
 
+	if(stats){
+		stats->updateTimings(UTT_WAIT_FOR_ADDED_FRAME,stats_t0);
+	}
+
 	// update background counts if necessary
 	if(!addToBGModel(frame,timestamp,frameNumber)){
 		logger->log(UFMF_ERROR,"Error adding frame to background model");
@@ -791,12 +817,20 @@ bool ufmfWriter::addFrame(unsigned char * frame, double timestamp){
 		return false;
 	}
 
+	if(stats){
+		stats_t0 = ufmfWriterStats::getTime();
+	}
+
 	// copy over the data
 	memcpy(uncompressedFrames[bufferIndex],frame,nPixels*sizeof(unsigned char));
 	uncompressedBufferTimestamps[bufferIndex] = timestamp;
 
 	// signal that the uncompressed buffer is filled
 	ReleaseSemaphore(uncompressedBufferFilledSemaphores[bufferIndex],1,NULL);
+
+	if(stats){
+		stats->updateTimings(UTT_ADD_FRAME,stats_t0);
+	}
 
 	return true;
 }
@@ -921,6 +955,11 @@ void ufmfWriter::setStatsParams(const char * statsName){
 // write a frame
 bool ufmfWriter::writeFrame(CompressedFrame * im){
 
+	ULARGE_INTEGER stats_t0;
+	if(stats){
+		stats_t0 = ufmfWriterStats::getTime();
+	}
+
 	int i;
 	_int64 filePosStart;
 	_int64 filePosEnd;
@@ -966,18 +1005,22 @@ bool ufmfWriter::writeFrame(CompressedFrame * im){
 	//	stats->update(index, index_timestamp, frameSizeBytes, isCompressed, numFore, numPxWritten, ncc, numBuffered, numDropped, nWrites, wWidth*wHeight, im, BGCenter, UFMF_DEBUG_3);
 	//}
 
+	if(stats){
+		stats->updateTimings(UTT_WRITE_FRAME,stats_t0);
+	}
+
 	return true;
 }
 
 // write the video header
 bool ufmfWriter::writeHeader(){
 
-	logger->log(UFMF_DEBUG_7,"Writing video header\n");
-
-	if(stats) {
-		//stats->clear();
-		stats->updateTimings(UTT_WRITE_HEADER);
+	ULARGE_INTEGER stats_t0;
+	if(stats){
+		stats_t0 = ufmfWriterStats::getTime();
 	}
+
+	logger->log(UFMF_DEBUG_7,"Writing video header\n")
 
 	// location of index
 	indexLocation = 0;
@@ -1014,6 +1057,10 @@ bool ufmfWriter::writeHeader(){
 	// coding: length(coding)
 	fwrite(colorCoding,1,colorCodingLength,pFile);
 
+	if(stats){
+		stats->updateTimings(UTT_WRITE_HEADER,stats_t0);
+	}
+
 	return true;
 
 }
@@ -1021,7 +1068,11 @@ bool ufmfWriter::writeHeader(){
 // write the indexes, pointers, close the movie
 bool ufmfWriter::finishWriting(){
 
-	if(stats) stats->updateTimings(UTT_WRITE_FOOTER);
+	ULARGE_INTEGER stats_t0;
+	if(stats){
+		stats_t0 = ufmfWriterStats::getTime();
+	}
+
 	logger->log(UFMF_DEBUG_3, "writing video footer and closing %s\n", fileName);
 
 	// write the index at the end of the file
@@ -1219,6 +1270,10 @@ bool ufmfWriter::finishWriting(){
 	fclose(pFile);
 	pFile = NULL;
 
+	if(stats){
+		stats->updateTimings(UTT_WRITE_FOOTER,stats_t0);
+	}
+
 	meanindex.clear();
 	meanindex_timestamp.clear();
 	index.clear();
@@ -1228,6 +1283,11 @@ bool ufmfWriter::finishWriting(){
 }
 
 bool ufmfWriter::writeBGKeyFrame(){
+
+	ULARGE_INTEGER stats_t0;
+	if(stats){
+		stats_t0 = ufmfWriterStats::getTime();
+	}
 
 	int i, j;
 	unsigned __int32 countscurr;
@@ -1268,6 +1328,10 @@ bool ufmfWriter::writeBGKeyFrame(){
 	nBGKeyFramesWritten++;
 	Unlock();
 
+	if(stats){
+		stats->updateTimings(UTT_WRITE_KEYFRAME,stats_t0);
+	}
+
 	//if(stats) stats->updateTimings(UTT_NONE);
 	return true;
 }
@@ -1282,11 +1346,20 @@ bool ufmfWriter::addToBGModel(unsigned __int8 * frame, double timestamp, unsigne
 		return true;
 	}
 
+	ULARGE_INTEGER stats_t0;
+	if(stats){
+		stats_t0 = ufmfWriterStats::getTime();
+	}
+
 	logger->log(UFMF_DEBUG_7,"Adding frame %d to background model counts\n",frameNumber);
 
 	bg->addFrame(frame,timestamp);
 	// store update time
 	lastBGUpdateTime = timestamp;
+
+	if(stats){
+		stats->updateTimings(UTT_UPDATE_BACKGROUND,stats_t0);
+	}
 
 	return true;
 }
@@ -1295,7 +1368,7 @@ bool ufmfWriter::updateBGModel(unsigned __int8 * frame, double timestamp, unsign
 
 	// if the background hasn't been updated, no need to write a new keyframe
 	if(lastBGUpdateTime <= lastBGKeyFrameTime){
-		return;
+		return true;
 	}
 
 	// time since last keyframe
@@ -1314,7 +1387,12 @@ bool ufmfWriter::updateBGModel(unsigned __int8 * frame, double timestamp, unsign
 	// no need to write a new keyframe if it hasn't been long enough
 	// TODO: change nInput != nFramesInit to nInput != BGKeyFramePeriodInit
 	if((nBGKeyFramesWrittenCurr > 0) && (dt < BGKeyFramePeriodCurr)){// && (nInput != nFramesInit)){
-		return;
+		return true;
+	}
+
+	ULARGE_INTEGER stats_t0;
+	if(stats){
+		stats_t0 = ufmfWriterStats::getTime();
 	}
 
 	logger->log(UFMF_DEBUG_7,"Updating background model at frame %d\n",frameNumber);
@@ -1366,6 +1444,10 @@ bool ufmfWriter::updateBGModel(unsigned __int8 * frame, double timestamp, unsign
 	keyframeTimestamp = timestamp;
 
 	Unlock();
+
+	if(stats){
+		stats->updateTimings(UTT_COMPUTE_BACKGROUND,stats_t0);
+	}
 
 	return true;
 
@@ -1446,6 +1528,11 @@ DWORD WINAPI ufmfWriter::compressionThreadManager(void* param){
 // compress next available uncompressed frame
 bool ufmfWriter::ProcessNextCompressFrame() {
 
+	ULARGE_INTEGER stats_t0;
+	if(stats){
+		stats_t0 = ufmfWriterStats::getTime();
+	}
+
 	// wait for an uncompressed frame
 	int bufferIndex, threadIndex;
 	DWORD waittime;
@@ -1465,6 +1552,10 @@ bool ufmfWriter::ProcessNextCompressFrame() {
 	if(bufferIndex < 0 || bufferIndex >= nBuffers){
 		logger->log(UFMF_ERROR,"Error waiting for an uncompressed frame to compress: %x\n",bufferIndex+WAIT_OBJECT_0);
 		return false;
+	}
+
+	if(stats){
+		stats_t0 = stats->updateTimings(UTT_WAIT_FOR_UNCOMPRESSED_FRAME_MANAGER,stats_t0);
 	}
 
 	logger->log(UFMF_DEBUG_7,"starting compression frame manager on buffer %d, frame %u\n",bufferIndex,uncompressedBufferFrameNumbers[bufferIndex]);
@@ -1502,12 +1593,22 @@ bool ufmfWriter::ProcessNextCompressFrame() {
 	Lock();
 	res = isWriting || nUncompressedFramesBuffered > 0;
 	Unlock();
+
+	if(stats){
+		stats_t0 = stats->updateTimings(UTT_WAIT_FOR_COMPRESS_THREAD,stats_t0);
+	}
+
 	return(res);
 
 }
 
 // compress frame queued for this thread
 bool ufmfWriter::ProcessNextCompressFrame(int threadIndex) {
+	
+	ULARGE_INTEGER stats_t0;
+	if(stats){
+		stats_t0 = ufmfWriterStats::getTime();
+	}
 
 	int bufferIndex;
 	unsigned __int64 frameNumber;
@@ -1517,6 +1618,10 @@ bool ufmfWriter::ProcessNextCompressFrame(int threadIndex) {
 	if(WaitForSingleObject(compressionThreadStartSignals[threadIndex],MAXWAITTIMEMS) != WAIT_OBJECT_0){
 		logger->log(UFMF_ERROR,"Error waiting for start signal for thread %d\n",threadIndex);
 		return false;
+	}
+
+	if(stats){
+		stats_t0 = stats->updateTimings(UTT_WAIT_FOR_UNCOMPRESSED_FRAME,stats_t0);
 	}
 
 	bufferIndex = threadBufferIndex[threadIndex];
@@ -1574,10 +1679,19 @@ bool ufmfWriter::ProcessNextCompressFrame(int threadIndex) {
 	res = isWriting || nUncompressedFramesBuffered > 0;
 	Unlock();
 
+	if(stats){
+		stats->updateTimings(UTT_COMPUTE_FRAME,stats_t0);
+	}
+
 	return(res);
 }
 
 bool ufmfWriter::ProcessNextWriteFrame(){
+
+	ULARGE_INTEGER stats_t0;
+	if(stats){
+		stats_t0 = ufmfWriterStats::getTime();
+	}
 
 	int bufferIndex;
 	unsigned __int64 frameNumber;
@@ -1646,6 +1760,10 @@ bool ufmfWriter::ProcessNextWriteFrame(){
 		}
 	}
 
+	if(stats){
+		stats->updateTimings(UTT_WAIT_FOR_COMPRESSED_FRAME,stats_t0);
+	}
+
 	// okay, we have a compressed frame
 	Lock(); // lock to access nCompressedFramesBuffered
 	nCompressedFramesBuffered--;
@@ -1661,6 +1779,9 @@ bool ufmfWriter::ProcessNextWriteFrame(){
 		Unlock();
 	}
 
+	if(stats){
+		stats_t0 = ufmfWriterStats::getTime();
+	}
 	// write the compressed frame
 	if(!writeFrame(compressedFrames[bufferIndex])){
 		logger->log(UFMF_ERROR,"Error writing frame %u from buffer %d\n",frameNumber,bufferIndex);
@@ -1674,6 +1795,10 @@ bool ufmfWriter::ProcessNextWriteFrame(){
 	bool res = isWriting || nCompressedFramesBuffered > 0;
 	Unlock();
 
+	if(stats){
+		stats->updateTimings(UTT_WRITE_FRAME,stats_t0);
+	}
+
 	return(res);
 
 }
@@ -1686,6 +1811,7 @@ bool ufmfWriter::stopThreads(bool waitForFinish){
 
 	// no need to lock when reading isWriting as this is the only thread that will write to it
 	if(isWriting){
+
 		Lock();
 		isWriting = false;
 		Unlock();

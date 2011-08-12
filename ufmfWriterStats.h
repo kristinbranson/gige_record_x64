@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include <vector>
+#include "ufmfLogger.h"
 
 #define BANDWIDTH_COMPUTATION_TIME_WINDOW_SEC 1
 #define NUM_FOREGROUND_BINS 3
@@ -16,8 +17,10 @@
 
 typedef enum {
 	UTT_NONE = 0,
+	UTT_START_WRITING,
 	UTT_WRITE_HEADER,
 	UTT_WRITE_FOOTER,
+	UTT_ADD_FRAME,
 	UTT_UPDATE_BACKGROUND,
 	UTT_COMPUTE_BACKGROUND, 
 	UTT_REWEIGHT_COUNTS,
@@ -26,9 +29,12 @@ typedef enum {
 	UTT_WRITE_FRAME,
 	UTT_COMPUTE_STATS, 
 	UTT_WAIT_FOR_ADDED_FRAME,
+	UTT_WAIT_FOR_UNCOMPRESSED_FRAME_MANAGER,
+	UTT_WAIT_FOR_COMPRESS_THREAD,
 	UTT_WAIT_FOR_UNCOMPRESSED_FRAME,
 	UTT_WAIT_FOR_COMPRESSED_FRAME,
-	UTT_NUM_TIMINGS
+	UTT_NUM_TIMINGS,
+	UTT_STOP_WRITE
 } ufmfTimingType;
 
 typedef struct {
@@ -60,8 +66,6 @@ class ufmfWriterStats {
 	double sumFPS, sumFPSSquared;
 
 	ufmfTimingUpdate timings[UTT_NUM_TIMINGS];
-	ULARGE_INTEGER lastUpdateTime;
-	ufmfTimingType lastUpdate;
 
 
 	__int64 foregroundBinCounts[NUM_FOREGROUND_BINS];
@@ -79,7 +83,7 @@ class ufmfWriterStats {
 	__int64 nFramesComputeFrameError;
 	__int64 nFramesCompressed;
 	__int64 nFramesBackSub;
-	udcamLogger *logger;
+	ufmfLogger *logger;
 	bool freeLogger;
 	bool printDebugMode;
 	
@@ -92,44 +96,44 @@ class ufmfWriterStats {
 
 public:
 
-	ufmfWriterStats(udcamLogger *logger, int width=-1, int height = -1, int streamPrintFreq=1, bool statPrintFrameErrors=true, 
+	ufmfWriterStats(ufmfLogger *logger, int width=-1, int height = -1, int streamPrintFreq=1, bool statPrintFrameErrors=true, 
 		bool statPrintTimings=true, int statComputeFrameErrorFreq=1, bool doOverwrite=true) { 
 		printDebugMode = true;
 		init(logger, width, height, streamPrintFreq, statPrintFrameErrors, statPrintTimings, statComputeFrameErrorFreq);
 	}
 
 	void printStreamHeader(){
-		logger->log(UDCAM_DEBUG_3, "streamStart\n"); 
-		logger->log(UDCAM_DEBUG_3, "frame,nFramesBuffered,timestamp,isCompressed,FPS,nFramesDropped,bytes,nForegroundPx,nPxWritten,nBoxes,meanPixelError,maxPixelError,maxFilterError");
+		logger->log(UFMF_DEBUG_3, "streamStart\n"); 
+		logger->log(UFMF_DEBUG_3, "frame,nFramesBuffered,timestamp,isCompressed,FPS,nFramesDropped,bytes,nForegroundPx,nPxWritten,nBoxes,meanPixelError,maxPixelError,maxFilterError");
 		if(statPrintTimings){
-			logger->log(UDCAM_DEBUG_3,",writeHeaderTime,writeFooterTime,updateBackgroundTime,computeBackgroundTime,reweightCountsTime,writeKeyFrameTime,computeFrameTime,writeFrameTime,computeStatisticsTime,waitForFrameCaptureTime");
+			logger->log(UFMF_DEBUG_3,",writeHeaderTime,writeFooterTime,updateBackgroundTime,computeBackgroundTime,reweightCountsTime,writeKeyFrameTime,computeFrameTime,writeFrameTime,computeStatisticsTime,waitForFrameCaptureTime");
 		}
-		logger->log(UDCAM_DEBUG_3,"\n");
+		logger->log(UFMF_DEBUG_3,"\n");
 	}
 	void printStreamFooter(){
-		logger->log(UDCAM_DEBUG_3, "streamEnd\n");
+		logger->log(UFMF_DEBUG_3, "streamEnd\n");
 	}
 	void printSummaryHeader(){
-		logger->log(UDCAM_DEBUG_0, "summaryStart\n"); 
-		logger->log(UDCAM_DEBUG_0, "nFrames,nFramesDroppedTotal,nFramesUncompressed,nFramesNoBackSub,meanFPS,stdFPS,maxFPS,minFPS,meanBandWidth,maxBandWidth,meanFrameSize,stdFrameSize,maxFrameSize,meanCompressionRate,meanNForegroundPx,stdNForegroundPx,maxNForegroundPx,meanNPxWritten,stdNPxWritten,maxNPxWritten,meanNBoxes,stdNBoxes,maxNBoxes");
+		logger->log(UFMF_DEBUG_0, "summaryStart\n"); 
+		logger->log(UFMF_DEBUG_0, "nFrames,nFramesDroppedTotal,nFramesUncompressed,nFramesNoBackSub,meanFPS,stdFPS,maxFPS,minFPS,meanBandWidth,maxBandWidth,meanFrameSize,stdFrameSize,maxFrameSize,meanCompressionRate,meanNForegroundPx,stdNForegroundPx,maxNForegroundPx,meanNPxWritten,stdNPxWritten,maxNPxWritten,meanNBoxes,stdNBoxes,maxNBoxes");
 		for(int i = 0; i < NUM_FOREGROUND_BINS; i++){
-			logger->log(UDCAM_DEBUG_0,",fracFramesWithFracFgPx>%f",foregroundThresholds[i]);
+			logger->log(UFMF_DEBUG_0,",fracFramesWithFracFgPx>%f",foregroundThresholds[i]);
 		}
 		if(statComputeFrameErrorFreq){
-			logger->log(UDCAM_DEBUG_0,",meanMeanPixelError,stdMeanPixelError,maxMeanPixelError,meanMaxPixelError,stdMaxPixelError,maxMaxPixelError,meanMaxFilterError,stdMaxFilterError,maxMaxFilterError");
+			logger->log(UFMF_DEBUG_0,",meanMeanPixelError,stdMeanPixelError,maxMeanPixelError,meanMaxPixelError,stdMaxPixelError,maxMaxPixelError,meanMaxFilterError,stdMaxFilterError,maxMaxFilterError");
 		}
 		if(statPrintTimings){
-			logger->log(UDCAM_DEBUG_0,",meanWriteHeaderTime,maxWriteHeaderTime,nWriteHeaderCalls,meanWriteFooterTime,maxWriteFooterTime,nWriteFooterCalls,meanUpdateBackgroundTime,maxUpdateBackgroundTime,nUpdateBackgroundCalls,meanComputeBackgroundTime,maxComputeBackgroundTime,nComputeBackgroundCalls,meanReweightCountsTime,maxReweightCountsTime,nReweightCountsCalls,meanWriteKeyFrameTime,maxWriteKeyFrameTime,nWriteKeyFrameCalls,meanComputeFrameTime,maxComputeFrameTime,nComputeFrameCalls,meanWriteFrameTime,maxWriteFrameTime,nWriteFrameCalls,meanComputeStatisticsTime,maxComputeStatisticsTime,nComputeStatisticsCalls,meanWaitForFrameCaptureTime,maxWaitForFrameCaptureTime,nWaitForFrameCaptureCalls");
+			logger->log(UFMF_DEBUG_0,",meanWriteHeaderTime,maxWriteHeaderTime,nWriteHeaderCalls,meanWriteFooterTime,maxWriteFooterTime,nWriteFooterCalls,meanUpdateBackgroundTime,maxUpdateBackgroundTime,nUpdateBackgroundCalls,meanComputeBackgroundTime,maxComputeBackgroundTime,nComputeBackgroundCalls,meanReweightCountsTime,maxReweightCountsTime,nReweightCountsCalls,meanWriteKeyFrameTime,maxWriteKeyFrameTime,nWriteKeyFrameCalls,meanComputeFrameTime,maxComputeFrameTime,nComputeFrameCalls,meanWriteFrameTime,maxWriteFrameTime,nWriteFrameCalls,meanComputeStatisticsTime,maxComputeStatisticsTime,nComputeStatisticsCalls,meanWaitForFrameCaptureTime,maxWaitForFrameCaptureTime,nWaitForFrameCaptureCalls");
 		}
-		logger->log(UDCAM_DEBUG_0,"\n");
+		logger->log(UFMF_DEBUG_0,"\n");
 	}
 	void printSummaryFooter(){
-		logger->log(UDCAM_DEBUG_0, "summaryEnd\n");
+		logger->log(UFMF_DEBUG_0, "summaryEnd\n");
 	}
 
 	ufmfWriterStats(const char *logName, int width=-1, int height = -1, int streamPrintFreq=1, bool statPrintFrameErrors=true, 
 		bool statPrintTimings=true, int statComputeFrameErrorFreq=1, bool doOverWrite=true) {
-		logger = new udcamLogger(logName, UDCAM_DEBUG_3, doOverWrite);
+		logger = new ufmfLogger(logName, UFMF_DEBUG_3, doOverWrite);
 		printDebugMode = false;
 		init(logger, width, height, streamPrintFreq, statPrintFrameErrors, statPrintTimings, statComputeFrameErrorFreq);
 		if(streamPrintFreq>0){
@@ -144,8 +148,6 @@ public:
 	}
 
 	void clear() {
-		lastUpdate = UTT_NONE;
-		memset(&lastUpdateTime, 0, sizeof(lastUpdateTime));
 
 		numFrames = 0; 
 		nFramesComputeFrameError = 0;
@@ -182,7 +184,7 @@ public:
 			timings[i].name = updateNames[i];
 		}
 	}
-	void init(udcamLogger *l, int width=-1, int height = -1, int streamPrintFreq=1, bool statPrintFrameErrors=true, 
+	void init(ufmfLogger *l, int width=-1, int height = -1, int streamPrintFreq=1, bool statPrintFrameErrors=true, 
 		bool statPrintTimings=true, int statComputeFrameErrorFreq=1) {
 		clear();
 		line_err = NULL;
@@ -222,7 +224,7 @@ public:
 	// Call this on every frame written to update stats
 	void update(std::vector<__int64> &index, std::vector<double> &index_timestamp, _int64 frameSize, bool isCompressedFrame, int numForeground, int numWritten, int numBoxes, 
 				int numBuffered, unsigned int numDropped, unsigned short *nWrites, int numPixels, unsigned __int8 *frame, float *background, 
-				udcamDebugLevel level) {
+				ufmfDebugLevel level) {
 
 		if(numFrames == 0 && index_timestamp.size() > 0) { startTime = index_timestamp[0]; }
 		unsigned int beg = numFrames;
@@ -431,29 +433,38 @@ public:
 		}
 	}
 
-	void updateTimings(ufmfTimingType t) {
-		if(statPrintTimings) {
-			// get the current time
-			SYSTEMTIME systemTime;
-			GetSystemTime( &systemTime );
-			FILETIME fileTime;
-			SystemTimeToFileTime( &systemTime, &fileTime );
-			ULARGE_INTEGER uli;
-			uli.LowPart = fileTime.dwLowDateTime; uli.HighPart = fileTime.dwHighDateTime;
+	static ULARGE_INTEGER getTime(){
 
-			if(lastUpdate) {
-				timings[lastUpdate].lastDur = (double)(uli.QuadPart - lastUpdateTime.QuadPart);
-				if(timings[lastUpdate].lastDur > timings[lastUpdate].maxDur) timings[lastUpdate].maxDur = timings[lastUpdate].lastDur;
-				timings[lastUpdate].sum += timings[lastUpdate].lastDur;
-				timings[lastUpdate].num++;
-				timings[lastUpdate].hasUpdate = true;
-			}
-			lastUpdate = t;
-			lastUpdateTime = uli;
-		}
+		SYSTEMTIME systemTime;
+		GetSystemTime( &systemTime );
+		FILETIME fileTime;
+		SystemTimeToFileTime( &systemTime, &fileTime );
+		ULARGE_INTEGER uli;
+		uli.LowPart = fileTime.dwLowDateTime; uli.HighPart = fileTime.dwHighDateTime;
+		return uli;
+
 	}
 
-	void printTimings(udcamDebugLevel level, bool printGlobal = false) {
+	ULARGE_INTEGER updateTimings(ufmfTimingType t, ULARGE_INTEGER startTime) {
+
+		ULARGE_INTEGER uli = getTime();
+
+		if(statPrintTimings) {
+			// get the current time
+
+			timings[t].lastDur = (double)(uli.QuadPart - startTime.QuadPart);
+			if(timings[t].lastDur > timings[t].maxDur) timings[t].maxDur = timings[t].lastDur;
+			timings[t].sum += timings[t].lastDur;
+			timings[t].num++;
+			timings[t].hasUpdate = true;
+
+		}
+
+		return uli;
+
+	}
+
+	void printTimings(ufmfDebugLevel level, bool printGlobal = false) {
 
 		int num = 0;
 		if(statPrintTimings) {
@@ -511,7 +522,7 @@ public:
 		}
 	}
 
-	void print(udcamDebugLevel level) {
+	void print(ufmfDebugLevel level) {
 		char str[5000], tmp[5000];
 		double muFPS = sumFPS / (double)(numFrames-1);
 		sigFPS = sqrt( sumFPSSquared / (numFrames-1) - muFPS*muFPS );
@@ -605,7 +616,7 @@ public:
 		//sumAverageErr = maxAverageErr = sumFilteredErr = maxFilteredErr = 0;
 
 	}
-	void printSummary(udcamDebugLevel level){
+	void printSummary(ufmfDebugLevel level){
 		if(!printDebugMode){
 			if(streamPrintFreq>0){
 				printStreamFooter();
@@ -613,7 +624,7 @@ public:
 			printSummaryHeader();
 		}
 		print(level);
-		printTimings(UDCAM_DEBUG_0, true);
+		printTimings(UFMF_DEBUG_0, true);
 		if(!printDebugMode){
 			printSummaryFooter();
 		}

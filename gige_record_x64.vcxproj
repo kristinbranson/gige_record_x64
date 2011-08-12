@@ -93,6 +93,7 @@
   <ItemGroup>
     <ClInclude Include="fmfWriter.h" />
     <ClInclude Include="ufmfWriter.h" />
+    <ClInclude Include="ufmfWriterStats.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
