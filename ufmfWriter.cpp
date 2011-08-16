@@ -1,8 +1,9 @@
 #include <windows.h>
 #include <stdio.h>
 #include "ufmfWriter.h"
-//#include "mwadaptorimaq.h"
 
+// prototypes of helper functions
+char * strtrim(char *aString);
 
 // ************************* BackgroundModel **************************
 
@@ -115,6 +116,8 @@ bool BackgroundModel::updateModel(){
 		//BGZ = MaxBGZ;
 		BGZ = 0;
 	}
+
+	return true;
 }
 
 // ******************************** CompressedFrame **************************************
@@ -335,6 +338,7 @@ void ufmfWriter::init(){
 
 	// *** output ufmf state ***
 	pFile = NULL;
+	logger = NULL;
 	indexLocation = 0;
 	indexPtrLocation = 0;
 
@@ -407,7 +411,7 @@ void ufmfWriter::init(){
 	MaxBGZ = max(0.0,(float)MaxBGNFrames - NBGUpdatesPerKeyFrame);
 
 	// * ufmf parameters *
-	isFixedSize = 0; // patches are of a fixed size
+	isFixedSize = 0; // patches are not of a fixed size
 	boxLength = 30; // length of foreground boxes to store
 	maxFracFgCompress = .25; // maximum fraction of pixels that can be foreground in order for us to compress
 
@@ -427,6 +431,116 @@ void ufmfWriter::init(){
 ufmfWriter::ufmfWriter(){
 	init();
 }
+
+void ufmfWriter::init(const char * fileName, unsigned __int32 pWidth, unsigned __int32 pHeight, unsigned __int32 nBuffers,
+	int MaxBGNFrames, double BGUpdatePeriod, double BGKeyFramePeriod, unsigned __int32 boxLength,
+	double backSubThresh, unsigned __int32 nFramesInit, double* BGKeyFramePeriodInit, int BGKeyFramePeriodInitLength, double maxFracFgCompress, 
+	const char *statFileName, bool printStats, int statStreamPrintFreq, bool statPrintFrameErrors, bool statPrintTimings, 
+	int statComputeFrameErrorFreq, unsigned __int32 nThreads){
+
+		int i, j;
+
+		// ***** parameters *****
+
+		// *** threading parameters ***
+		this->nThreads = nThreads;
+		if(nBuffers < nThreads)
+			this->nBuffers = nThreads;
+		else
+			this->nBuffers = nBuffers;
+
+		// *** video parameters ***
+		strcpy(this->fileName, fileName);
+		//capture height/width
+		this->wWidth = pWidth;
+		this->wHeight = pHeight;
+		nPixels = (unsigned int)wWidth*(unsigned int)wHeight;
+
+		// *** compression parameters ***
+
+		// * background subtraction parameters *
+		this->MaxBGNFrames = MaxBGNFrames;
+		this->BGUpdatePeriod = BGUpdatePeriod;
+		this->BGKeyFramePeriod = BGKeyFramePeriod;
+		this->boxLength = boxLength;
+		this->backSubThresh = (float)backSubThresh;
+		this->nFramesInit = nFramesInit;
+		for(int i = 0; i < BGKeyFramePeriodInitLength; i++){
+			this->BGKeyFramePeriodInit[i] = BGKeyFramePeriodInit[i];
+		}
+		this->BGKeyFramePeriodInitLength = BGKeyFramePeriodInitLength;
+		float NBGUpdatesPerKeyFrame = (float)(BGKeyFramePeriod / BGUpdatePeriod);
+		nBGUpdatesPerKeyFrame = (int)floor(BGKeyFramePeriod / BGUpdatePeriod);
+		MaxBGZ = max(0.0,(float)MaxBGNFrames - NBGUpdatesPerKeyFrame);
+
+		// * ufmf parameters *
+		this->maxFracFgCompress = maxFracFgCompress;
+
+		// *** statistics parameters ***
+		if(statFileName == NULL){
+			strcpy(this->statFileName,"");
+		}
+		else{
+			strcpy(this->statFileName,statFileName);
+		}
+		this->printStats = printStats;
+		this->statStreamPrintFreq = statStreamPrintFreq;
+		this->statPrintFrameErrors = statPrintFrameErrors;
+		this->statPrintTimings = statPrintTimings;
+		this->statComputeFrameErrorFreq = statComputeFrameErrorFreq;
+
+		// ***** allocate stuff *****
+
+		// *** threading/buffering state ***
+		uncompressedFrames = new unsigned char*[nBuffers];
+		for(i = 0; i < (int)nBuffers; i++){
+			uncompressedFrames[i] = new unsigned char[nPixels];
+			memset(uncompressedFrames[i],0,nPixels*sizeof(char));
+		}
+		uncompressedBufferTimestamps = new double[nBuffers];
+		memset(uncompressedBufferTimestamps,0,nBuffers*sizeof(double));
+		uncompressedBufferFrameNumbers = new unsigned __int64[nBuffers];
+		memset(uncompressedBufferFrameNumbers,0,nBuffers*sizeof(unsigned __int64));
+		compressedFrames = new CompressedFrame*[nBuffers];
+		for(i = 0; i < (int)nBuffers; i++){
+			compressedFrames[i] = new CompressedFrame(wWidth,wHeight,boxLength,maxFracFgCompress);
+		}
+
+		// allocate compression thread stuff
+		_compressionThreads = new HANDLE[nThreads];
+		_compressionThreadIDs = new DWORD[nThreads];
+		compressionThreadReadySignals = new HANDLE[nThreads];
+		compressionThreadStartSignals = new HANDLE[nThreads];
+		threadBufferIndex = new int[nThreads];
+		memset(threadBufferIndex,0,nThreads*sizeof(int));
+
+		// allocate semaphores
+		uncompressedBufferEmptySemaphores = new HANDLE[nBuffers];
+		uncompressedBufferFilledSemaphores = new HANDLE[nBuffers];
+		compressedBufferEmptySemaphores = new HANDLE[nBuffers];
+		compressedBufferFilledSemaphores = new HANDLE[nBuffers];
+
+		//// *** background subtraction state ***
+		bg = new BackgroundModel(nPixels,nBGUpdatesPerKeyFrame);
+		BGLowerBound0 = new unsigned __int8[nPixels]; // per-pixel lower bound on background
+		memset(BGLowerBound0,0,nPixels*sizeof(unsigned __int8));
+		BGUpperBound0 = new unsigned __int8[nPixels]; // per-pixel upper bound on background
+		memset(BGUpperBound0,0,nPixels*sizeof(unsigned __int8));
+		BGLowerBound1 = new unsigned __int8[nPixels]; // per-pixel lower bound on background
+		memset(BGLowerBound1,0,nPixels*sizeof(unsigned __int8));
+		BGUpperBound1 = new unsigned __int8[nPixels]; // per-pixel upper bound on background
+		memset(BGUpperBound1,0,nPixels*sizeof(unsigned __int8));
+
+		// *** logging state ***
+		if(printStats) {
+			if(statFileName && strcmp(statFileName,""))
+				stats = new ufmfWriterStats(statFileName, wWidth, wHeight, statStreamPrintFreq, statPrintFrameErrors, statPrintTimings, statComputeFrameErrorFreq, true);
+			else
+				stats = new ufmfWriterStats(logger, wWidth, wHeight, statStreamPrintFreq, statPrintFrameErrors, statPrintTimings, statComputeFrameErrorFreq, true);
+		}
+
+}
+
 
 // parameters:
 // [video parameters:]
@@ -456,109 +570,33 @@ ufmfWriter::ufmfWriter(const char * fileName, unsigned __int32 pWidth, unsigned 
 	int MaxBGNFrames, double BGUpdatePeriod, double BGKeyFramePeriod, unsigned __int32 boxLength,
 	double backSubThresh, unsigned __int32 nFramesInit, double* BGKeyFramePeriodInit, int BGKeyFramePeriodInitLength, double maxFracFgCompress, 
 	const char *statFileName, bool printStats, int statStreamPrintFreq, bool statPrintFrameErrors, bool statPrintTimings, 
-	int statComputeFrameErrorFreq, int nThreads){
+	int statComputeFrameErrorFreq, unsigned __int32 nThreads){
 
-	int i, j;
-
-	// initialize state, set default parameters
-	init();
-
-	// ***** parameters *****
-
-	// *** threading parameters ***
-	this->nThreads = nThreads;
-	if(nBuffers < nThreads)
-		this->nBuffers = nThreads;
-	else
-		this->nBuffers = nBuffers;
-
-	// *** video parameters ***
-	strcpy(this->fileName, fileName);
-	//capture height/width
-	this->wWidth = pWidth;
-	this->wHeight = pHeight;
-	nPixels = (unsigned int)wWidth*(unsigned int)wHeight;
-
-	// *** compression parameters ***
-
-	// * background subtraction parameters *
-	this->MaxBGNFrames = MaxBGNFrames;
-	this->BGUpdatePeriod = BGUpdatePeriod;
-	this->BGKeyFramePeriod = BGKeyFramePeriod;
-	this->boxLength = boxLength;
-	this->backSubThresh = (float)backSubThresh;
-	this->nFramesInit = nFramesInit;
-	for(int i = 0; i < BGKeyFramePeriodInitLength; i++){
-		this->BGKeyFramePeriodInit[i] = BGKeyFramePeriodInit[i];
-	}
-	this->BGKeyFramePeriodInitLength = BGKeyFramePeriodInitLength;
-	float NBGUpdatesPerKeyFrame = (float)(BGKeyFramePeriod / BGUpdatePeriod);
-	nBGUpdatesPerKeyFrame = (int)floor(BGKeyFramePeriod / BGUpdatePeriod);
-	MaxBGZ = max(0.0,(float)MaxBGNFrames - NBGUpdatesPerKeyFrame);
-
-	// * ufmf parameters *
-	this->maxFracFgCompress = maxFracFgCompress;
-
-	// *** statistics parameters ***
-	strcpy(this->statFileName,statFileName);
-	this->printStats = printStats;
-	this->statStreamPrintFreq = statStreamPrintFreq;
-	this->statPrintFrameErrors = statPrintFrameErrors;
-	this->statPrintTimings = statPrintTimings;
-	this->statComputeFrameErrorFreq = statComputeFrameErrorFreq;
-
-	// ***** allocate stuff *****
-
-	// *** threading/buffering state ***
-	uncompressedFrames = new unsigned char*[nBuffers];
-	for(i = 0; i < nBuffers; i++){
-		uncompressedFrames[i] = new unsigned char[nPixels];
-		memset(uncompressedFrames[i],0,nPixels*sizeof(char));
-	}
-	uncompressedBufferTimestamps = new double[nBuffers];
-	memset(uncompressedBufferTimestamps,0,nBuffers*sizeof(double));
-	uncompressedBufferFrameNumbers = new unsigned __int64[nBuffers];
-	memset(uncompressedBufferFrameNumbers,0,nBuffers*sizeof(unsigned __int64));
-	compressedFrames = new CompressedFrame*[nBuffers];
-	for(i = 0; i < nBuffers; i++){
-		compressedFrames[i] = new CompressedFrame(wWidth,wHeight,boxLength,maxFracFgCompress);
-	}
-
-	// allocate compression thread stuff
-	_compressionThreads = new HANDLE[nThreads];
-	_compressionThreadIDs = new DWORD[nThreads];
-	compressionThreadReadySignals = new HANDLE[nThreads];
-	threadBufferIndex = new int[nThreads];
-	memset(threadBufferIndex,0,nThreads*sizeof(int));
-
-	// allocate semaphores
-	uncompressedBufferEmptySemaphores = new HANDLE[nBuffers];
-	uncompressedBufferFilledSemaphores = new HANDLE[nBuffers];
-	compressedBufferEmptySemaphores = new HANDLE[nBuffers];
-	compressedBufferFilledSemaphores = new HANDLE[nBuffers];
-
-	//// *** background subtraction state ***
-	bg = new BackgroundModel(nPixels,nBGUpdatesPerKeyFrame);
-	BGLowerBound0 = new unsigned __int8[nPixels]; // per-pixel lower bound on background
-	memset(BGLowerBound0,0,nPixels*sizeof(unsigned __int8));
-	BGUpperBound0 = new unsigned __int8[nPixels]; // per-pixel upper bound on background
-	memset(BGUpperBound0,0,nPixels*sizeof(unsigned __int8));
-	BGLowerBound1 = new unsigned __int8[nPixels]; // per-pixel lower bound on background
-	memset(BGLowerBound1,0,nPixels*sizeof(unsigned __int8));
-	BGUpperBound1 = new unsigned __int8[nPixels]; // per-pixel upper bound on background
-	memset(BGUpperBound1,0,nPixels*sizeof(unsigned __int8));
 
 	// *** logging state ***
 	this->logFID = logFID;
-	logger = new ufmfLogger(logFID);
-	if(printStats) {
-		if(statFileName && strcmp(statFileName,""))
-			stats = new ufmfWriterStats(statFileName, wWidth, wHeight, statStreamPrintFreq, statPrintFrameErrors, statPrintTimings, statComputeFrameErrorFreq, true);
-		else
-			stats = new ufmfWriterStats(logger, wWidth, wHeight, statStreamPrintFreq, statPrintFrameErrors, statPrintTimings, statComputeFrameErrorFreq, true);
-	}
+	logger = new ufmfLogger(logFID,UFMF_DEBUG_7);
+
+	init(fileName, pWidth, pHeight, nBuffers, MaxBGNFrames, BGUpdatePeriod, BGKeyFramePeriod,
+		boxLength, backSubThresh, nFramesInit, BGKeyFramePeriodInit, BGKeyFramePeriodInitLength, 
+		maxFracFgCompress, statFileName, printStats, statStreamPrintFreq, statPrintFrameErrors, 
+		statPrintTimings, statComputeFrameErrorFreq, nThreads);
 
  }
+
+// parameter file constructor
+ufmfWriter::ufmfWriter(const char * fileName, unsigned __int32 pWidth, unsigned __int32 pHeight, FILE* logFID, const char * paramsFile){
+	// initialize state, set default parameters
+	init();
+	// *** logging state ***
+	this->logFID = logFID;
+	logger = new ufmfLogger(logFID,UFMF_DEBUG_7);
+	readParamsFile(paramsFile);
+	init(fileName, pWidth, pHeight, nBuffers, MaxBGNFrames, BGUpdatePeriod, BGKeyFramePeriod,
+		boxLength, backSubThresh, nFramesInit, BGKeyFramePeriodInit, BGKeyFramePeriodInitLength, 
+		maxFracFgCompress, statFileName, printStats, statStreamPrintFreq, statPrintFrameErrors, 
+		statPrintTimings, statComputeFrameErrorFreq, nThreads);
+}
 
  // destructor
  ufmfWriter::~ufmfWriter(){
@@ -634,7 +672,7 @@ bool ufmfWriter::startWrite(){
 	}
 
 	// compression semaphores
-	for(i = 0; i < nBuffers; i++){
+	for(i = 0; i < (int)nBuffers; i++){
 		// initialize value to 1 to signify empty
 		uncompressedBufferEmptySemaphores[i] = CreateSemaphore(NULL,1,1,NULL);
 		if(uncompressedBufferEmptySemaphores[i] == NULL){
@@ -711,7 +749,7 @@ bool ufmfWriter::startWrite(){
 	}
 
 	// start compression threads
-	for(i = 0; i < nThreads; i++){
+	for(i = 0; i < (int)nThreads; i++){
 		_compressionThreads[i] = CreateThread(NULL,0,compressionThread,this,0,&_compressionThreadIDs[i]);
 		if(_compressionThreads[i] == NULL){
 			logger->log(UFMF_ERROR,"Error creating compression thread %d\n",i);
@@ -721,6 +759,7 @@ bool ufmfWriter::startWrite(){
 			logger->log(UFMF_ERROR, "Error starting compression thread %d\n",i); 
 			return false; 
 		}
+		ReleaseSemaphore(compressionThreadReadySignals[i],1,NULL);
 	}
 
 	// start write thread
@@ -785,8 +824,8 @@ bool ufmfWriter::addFrame(unsigned char * frame, double timestamp){
 	}
 
 	// wait for any uncompressed frame to be empty
-	bufferIndex = (int)WaitForMultipleObjects(nBuffers,uncompressedBufferEmptySemaphores,false,MAXWAITTIMEMS) - (int)WAIT_OBJECT_0;
-	if(bufferIndex < 0 || bufferIndex >= nBuffers){
+	bufferIndex = (int)WaitForMultipleObjects((DWORD)nBuffers,uncompressedBufferEmptySemaphores,false,MAXWAITTIMEMS) - (int)WAIT_OBJECT_0;
+	if(bufferIndex < 0 || bufferIndex >= (int)nBuffers){
 		logger->log(UFMF_ERROR,"Error waiting for a frame to be added: %x\n",bufferIndex+WAIT_OBJECT_0);
 		return false;
 	}
@@ -854,33 +893,66 @@ void ufmfWriter::setVideoParams(char * fileName, int wWidth, int wHeight){
 // backSubThresh: threshold for storing foreground pixels
 // nFramesInit: for the first nFramesInit, we will always update the background model
 // maxFracFgCompress: maximum fraction of pixels that can be foreground in order for us to try to compress the frame
-bool ufmfWriter::readParamsFile(char * paramsFile){
+bool ufmfWriter::readParamsFile(const char * paramsFile){
 
 	FILE * fp = fopen(paramsFile,"r");
 	bool failure = false;
-	const size_t maxsz = 200;
+	const size_t maxsz = 1000;
 	char line[maxsz];
-	char paramName[maxsz];
+	char * paramName;
+	char * paramValueStr;
 	double paramValue;
 	char * s;
 
-	logger->log(UFMF_ERROR,"Reading parameters from file %s\n",paramsFile);
+	if(logger) logger->log(UFMF_ERROR,"Reading parameters from file %s\n",paramsFile);
 
 	if(fp == NULL){
-		logger->log(UFMF_ERROR,"Error opening parameter file %s for reading.\n",paramsFile);
+		if(logger == NULL)
+			fprintf(stderr,"Error opening parameter file %s for reading.\n",paramsFile);
+		else
+			logger->log(UFMF_ERROR,"Error opening parameter file %s for reading.\n",paramsFile);
 		return failure;
 	}
+	//init(fileName, pWidth, pHeight, logFID, nBuffers, MaxBGNFrames, BGUpdatePeriod, BGKeyFramePeriod,
+	//	boxLength, backSubThresh, nFramesInit, BGKeyFramePeriodInit, BGKeyFramePeriodInitLength, 
+	//	maxFracFgCompress, statFileName, printStats, statStreamPrintFreq, statPrintFrameErrors, 
+	//	statPrintTimings, statComputeFrameErrorFreq, nThreads);
 	while(true){
 		if(fgets(line,maxsz,fp) == NULL) break;
-		if(line[0] == '#') continue;
-		if(sscanf(line,"%200[^,],%lf\n",paramName,&paramValue) < 1){
-			if(logger) logger->log(UFMF_WARNING,"could not parse line %s\n",line);
+
+		paramValueStr = strchr(line,'=');
+
+		if(paramValueStr == NULL){
 			continue;
 		}
-		logger->log(UFMF_DEBUG_3,"paramName = %s, paramValue = %lf\n",paramName,paramValue);
+
+        paramValueStr[0] = '\0';
+        paramValueStr++;    
+    
+        paramName = strtrim(line);
+        paramValueStr = strtrim(paramValueStr);
+
+		// comment
+		if(strlen(paramName) > 0 && paramName[0] == '#')
+			continue;
+        
+        if(strlen(paramName) == 0 || strlen(paramValueStr) == 0){
+			if(logger) 
+				logger->log(UFMF_WARNING,"could not parse line %s\n",line);
+			else
+				fprintf(stderr,"could not parse line %s\n",line);
+			continue;
+		}
+
+		paramValue = atof(paramValueStr);
+		if(logger)
+			logger->log(UFMF_DEBUG_3,"paramName = %s, paramValue = %lf\n",paramName,paramValue);
 
 		// maximum fraction of pixels that can be foreground to try compressing frame
-		if(strcmp(paramName,"UFMFMaxFracFgCompress") == 0){
+		if(strcmp(paramName,"UFMFNBuffers") == 0){
+			this->nBuffers = (unsigned __int32)paramValue;
+		}
+		else if(strcmp(paramName,"UFMFMaxFracFgCompress") == 0){
 			this->maxFracFgCompress = paramValue;
 		}
 		// number of frames the background model should be based on 
@@ -908,10 +980,13 @@ bool ufmfWriter::readParamsFile(char * paramsFile){
 			this->nFramesInit = (int)paramValue;
 		}
 		else if(strcmp(paramName,"UFMFBGKeyFramePeriodInit") == 0){
-			s = strtok(line,",");
-			for(s = strtok(NULL,","), BGKeyFramePeriodInitLength = 0; s != NULL; s = strtok(NULL,","), BGKeyFramePeriodInitLength++){
+			s = paramValueStr;
+			if(logger) logger->log(UFMF_DEBUG_7,"UFMFBGKeyFramePeriodInit: ");
+			for(s = strtok(s,","), BGKeyFramePeriodInitLength = 0; s != NULL; s = strtok(NULL,","), BGKeyFramePeriodInitLength++){
 				sscanf(s,"%lf",&this->BGKeyFramePeriodInit[BGKeyFramePeriodInitLength]);
+				if(logger) logger->log(UFMF_DEBUG_7,"%lf,",this->BGKeyFramePeriodInit[BGKeyFramePeriodInitLength]);
 			}
+			if(logger) logger->log(UFMF_DEBUG_7," length = %d\n",BGKeyFramePeriodInitLength);
 		}
 		// Whether to compute UFMF diagnostics
 		else if(strcmp(paramName,"UFMFPrintStats") == 0){
@@ -929,8 +1004,18 @@ bool ufmfWriter::readParamsFile(char * paramsFile){
 		else if(strcmp(paramName,"UFMFStatPrintTimings") == 0){
 			this->statPrintTimings = paramValue != 0;
 		}
+		else if(strcmp(paramName,"UFMFStatFileName") == 0){
+			strcpy(this->statFileName,paramValueStr);
+		}
+		else if(strcmp(paramName,"UFMFStatPrintFrameErrors") == 0){
+			this->statPrintFrameErrors = paramValue != 0;
+		}
+		else if(strcmp(paramName,"UFMFNThreads") == 0){
+			this->nThreads = (unsigned __int32)paramValue;
+		}
 		else{
 			if(logger) logger->log(UFMF_WARNING,"Unknown parameter %s with value %f skipped\n",paramName,paramValue);
+			else fprintf(stderr,"Unknown parameter %s with value %f skipped\n",paramName,paramValue);
 		}
 
 
@@ -1020,7 +1105,7 @@ bool ufmfWriter::writeHeader(){
 		stats_t0 = ufmfWriterStats::getTime();
 	}
 
-	logger->log(UFMF_DEBUG_7,"Writing video header\n")
+	logger->log(UFMF_DEBUG_7,"Writing video header\n");
 
 	// location of index
 	indexLocation = 0;
@@ -1428,6 +1513,10 @@ bool ufmfWriter::updateBGModel(unsigned __int8 * frame, double timestamp, unsign
 		if(tmp < 0) BGLowerBound0[i] = 0;
 		else if(tmp > 255) BGLowerBound0[i] = 255;
 		else BGLowerBound0[i] = (unsigned __int8)tmp;
+		tmp = floor(bg->BGCenter[i] + backSubThresh);
+		if(tmp < 0) BGUpperBound0[i] = 0;
+		else if(tmp > 255) BGUpperBound0[i] = 255;
+		else BGUpperBound0[i] = (unsigned __int8)tmp;
 	}
 
 	// swap the background subtraction images
@@ -1544,13 +1633,16 @@ bool ufmfWriter::ProcessNextCompressFrame() {
 		waittime = MAXWAITTIMEMS;
 	}
 	else{
+		if(nUncompressedFramesBuffered == 0){
+			return false;
+		}
 		waittime = 100;
 	}
 	Unlock();
 
-	bufferIndex = (int)WaitForMultipleObjects(nBuffers,uncompressedBufferFilledSemaphores,false,waittime) - (int)WAIT_OBJECT_0;
-	if(bufferIndex < 0 || bufferIndex >= nBuffers){
-		logger->log(UFMF_ERROR,"Error waiting for an uncompressed frame to compress: %x\n",bufferIndex+WAIT_OBJECT_0);
+	bufferIndex = (int)WaitForMultipleObjects((DWORD)nBuffers,uncompressedBufferFilledSemaphores,false,waittime) - (int)WAIT_OBJECT_0;
+	if(bufferIndex < 0 || bufferIndex >= (int)nBuffers){
+		if(isWriting) logger->log(UFMF_ERROR,"Error waiting for an uncompressed frame to compress: %x\n",bufferIndex+WAIT_OBJECT_0);
 		return false;
 	}
 
@@ -1575,9 +1667,16 @@ bool ufmfWriter::ProcessNextCompressFrame() {
 	Unlock();
 
 	// find an available compression thread
-	threadIndex = (int)WaitForMultipleObjects(nThreads,compressionThreadReadySignals,false,MAXWAITTIMEMS)- (int)WAIT_OBJECT_0;
-	if(threadIndex < 0 || threadIndex >= nThreads){
-		logger->log(UFMF_ERROR,"Error waiting for an compression thread to be ready: %x\n",threadIndex+WAIT_OBJECT_0);
+	logger->log(UFMF_DEBUG_7,"waiting for a compression thread to be ready\n");
+	threadIndex = (int)WaitForMultipleObjects((DWORD)nThreads,compressionThreadReadySignals,false,MAXWAITTIMEMS)- (int)WAIT_OBJECT_0;
+	logger->log(UFMF_DEBUG_7,"Found threadIndex = %d\n",threadIndex);
+	if(threadIndex < 0 || threadIndex >= (int)nThreads){
+		if(threadIndex+WAIT_OBJECT_0 == WAIT_TIMEOUT){
+			logger->log(UFMF_ERROR,"Error waiting for an compression thread to be ready: TIMEOUT\n");
+		}
+		else{
+			logger->log(UFMF_ERROR,"Error waiting for an compression thread to be ready: %x\n",threadIndex+WAIT_OBJECT_0);
+		}
 		return false;
 	}
 
@@ -1615,10 +1714,7 @@ bool ufmfWriter::ProcessNextCompressFrame(int threadIndex) {
 	bool res;
 
 	// wait for start signal
-	if(WaitForSingleObject(compressionThreadStartSignals[threadIndex],MAXWAITTIMEMS) != WAIT_OBJECT_0){
-		logger->log(UFMF_ERROR,"Error waiting for start signal for thread %d\n",threadIndex);
-		return false;
-	}
+	WaitForSingleObject(compressionThreadStartSignals[threadIndex],INFINITE);
 
 	if(stats){
 		stats_t0 = stats->updateTimings(UTT_WAIT_FOR_UNCOMPRESSED_FRAME,stats_t0);
@@ -1638,6 +1734,7 @@ bool ufmfWriter::ProcessNextCompressFrame(int threadIndex) {
 		else{
 			Unlock(); 
 		}
+		logger->log(UFMF_DEBUG_3,"nUncompressedFramesBuffered == 0, stopping compression thread %d\n",threadIndex);
 		return false;
 	}
 	nUncompressedFramesBuffered--;
@@ -1708,8 +1805,12 @@ bool ufmfWriter::ProcessNextWriteFrame(){
 	while(true){
 
 		// wait for any compressed frame to be filled
-		bufferIndex = (int)WaitForMultipleObjects(nBuffers,compressedBufferFilledSemaphores,false,MAXWAITTIMEMS) - (int)WAIT_OBJECT_0;
+		bufferIndex = (int)WaitForMultipleObjects((DWORD)nBuffers,compressedBufferFilledSemaphores,false,MAXWAITTIMEMS) - (int)WAIT_OBJECT_0;
 
+		if(bufferIndex > nBuffers || bufferIndex < 0){
+			logger->log(UFMF_ERROR,"Error waiting for compressedBufferFilledSemaphore in write thread\n");
+			return false;
+		}
 		// Check if we were signalled to stop writing
 		Lock(); // lock because we are accessing isWriting and nCompressedFramesBuffered
 		if(nCompressedFramesBuffered == 0) {
@@ -1739,8 +1840,8 @@ bool ufmfWriter::ProcessNextWriteFrame(){
 		// see if the compressed frame is available too
 		Lock();
 		bufferIndex = -1;
-		for(int i = 0; i < nBuffers; i++){
-			if(compressedFrames[bufferIndex]->frameNumber == frameNumber){
+		for(int i = 0; i < (int)nBuffers; i++){
+			if(compressedFrames[i]->frameNumber == frameNumber){
 				bufferIndex = i;
 				logger->log(UFMF_DEBUG_7,"also found frame %u after getting the signal from %u\n",frameNumber,compressedFrames[bufferIndex]->frameNumber);
 				break;
@@ -1822,19 +1923,36 @@ bool ufmfWriter::stopThreads(bool waitForFinish){
 				Lock();
 				nUncompressedFramesBuffered = 0;
 				Unlock();
-				for(int j = 0; j < nBuffers; j++){
+				for(int j = 0; j < (int)nBuffers; j++){
 					ReleaseSemaphore(uncompressedBufferFilledSemaphores[j], 1, NULL);
 				}
 			}
+			else{
+				Lock();
+				if(nUncompressedFramesBuffered == 0){
+					Unlock();
+					for(int j = 0; j < (int)nBuffers; j++){
+						ReleaseSemaphore(uncompressedBufferFilledSemaphores[j], 1, NULL);
+					}
+				}
+				else{
+					Unlock();
+				}
+			}
+					
 			if(WaitForSingleObject(_compressionThreadManager,MAXWAITTIMEMS) != WAIT_OBJECT_0){
 				logger->log(UFMF_ERROR,"Error shutting down compression thread manager\n");
+			}
+			else{
+				logger->log(UFMF_DEBUG_3,"Successfully shut down compression thread manager\n");
 			}
 			CloseHandle(_compressionThreadManager);
 			_compressionThreadManager = NULL;
 		}
 
-		for(int i = 0; i < nThreads; i++){
+		for(int i = 0; i < (int)nThreads; i++){
 			logger->log(UFMF_DEBUG_7,"stopping compression thread %d\n",i);
+			ReleaseSemaphore(compressionThreadStartSignals[i],1,NULL);
 			if(_compressionThreads[i]){
 				if(!waitForFinish){
 					// set number of frames buffered to 0
@@ -1845,6 +1963,16 @@ bool ufmfWriter::stopThreads(bool waitForFinish){
 					// since nUncompressedFramesBuffered == 0 and isWriting == false, we won't try to 
 					// compress a frame
 					ReleaseSemaphore(compressionThreadStartSignals[i], 1, NULL);
+				}
+				else{
+					Lock();
+					if(nUncompressedFramesBuffered == 0){
+						Unlock();
+						ReleaseSemaphore(compressionThreadStartSignals[i], 1, NULL);
+					}
+					else{
+						Unlock();
+					}
 				}
 				if(WaitForSingleObject(_compressionThreads[i],MAXWAITTIMEMS) != WAIT_OBJECT_0){
 					logger->log(UFMF_ERROR,"Error shutting down compression thread %d\n",i);
@@ -1864,19 +1992,35 @@ bool ufmfWriter::stopThreads(bool waitForFinish){
 				// increment semaphores so that the compression threads don't block forever. 
 				// since nCompressedFramesBuffered == 0 and isWriting == false, we won't try to 
 				// compress a frame
-				for(int j = 0; j < nBuffers; j++){
+				for(int j = 0; j < (int)nBuffers; j++){
 					ReleaseSemaphore(compressedBufferFilledSemaphores[j], 1, NULL);
 				}
 				if(WaitForSingleObject(_writeThread, MAXWAITTIMEMS) != WAIT_OBJECT_0){
 					logger->log(UFMF_ERROR,"Error shutting down write thread\n");
 				}
 			}
+			else{
+				Lock();
+				if(nCompressedFramesBuffered == 0){
+					Unlock();
+					for(int j = 0; j < (int)nBuffers; j++){
+						ReleaseSemaphore(compressedBufferFilledSemaphores[j], 1, NULL);
+					}
+				}
+				else{
+					Unlock();
+				}
+			}
+
 			//Close thread handle
 			CloseHandle(_writeThread);
 			_writeThread = NULL;
 
 		}
 	}
+
+	return true;
+
 }
 
 // lock when accessing global data
@@ -1897,7 +2041,7 @@ void ufmfWriter::deallocateBuffers(){
 
 	int i;
 	if(uncompressedFrames != NULL){
-		for(i = 0; i < nBuffers; i++){
+		for(i = 0; i < (int)nBuffers; i++){
 			if(uncompressedFrames[i] != NULL){
 				delete [] uncompressedFrames[i];
 				uncompressedFrames[i] = NULL;
@@ -1909,7 +2053,7 @@ void ufmfWriter::deallocateBuffers(){
 	nUncompressedFramesBuffered = 0;
 
 	if(compressedFrames != NULL){
-		for(i = 0; i < nBuffers; i++){
+		for(i = 0; i < (int)nBuffers; i++){
 			if(compressedFrames[i] != NULL){
 				delete compressedFrames[i];
 				compressedFrames[i] = NULL;
@@ -1957,7 +2101,7 @@ void ufmfWriter::deallocateThreadStuff(){
 
 	int i;
 	if(_compressionThreads != NULL){
-		for(i = 0; i < nThreads; i++){
+		for(i = 0; i < (int)nThreads; i++){
 			if(_compressionThreads[i]){
 				CloseHandle(_compressionThreads[i]);
 				_compressionThreads[i] = NULL;
@@ -1973,7 +2117,7 @@ void ufmfWriter::deallocateThreadStuff(){
 	}
 
 	if(compressionThreadReadySignals != NULL){
-		for(i = 0; i < nThreads; i++){
+		for(i = 0; i < (int)nThreads; i++){
 			if(compressionThreadReadySignals[i]){
 				CloseHandle(compressionThreadReadySignals[i]);
 				compressionThreadReadySignals[i] = NULL;
@@ -1984,7 +2128,7 @@ void ufmfWriter::deallocateThreadStuff(){
 	}
 
 	 if(compressionThreadStartSignals != NULL){
-		 for(i = 0; i < nThreads; i++){
+		 for(i = 0; i < (int)nThreads; i++){
 			 if(compressionThreadStartSignals[i]){
 				 CloseHandle(compressionThreadStartSignals[i]);
 				 compressionThreadStartSignals[i] = NULL;
@@ -1995,67 +2139,94 @@ void ufmfWriter::deallocateThreadStuff(){
 	 }
 
 	 if(lock){
-		CloseHandle(lock);
-		lock = NULL;
-	}
+		 CloseHandle(lock);
+		 lock = NULL;
+	 }
 
-	if(uncompressedBufferEmptySemaphores != NULL){
-		for(i = 0; i < nThreads; i++){
-			if(uncompressedBufferEmptySemaphores[i]){
-				CloseHandle(uncompressedBufferEmptySemaphores[i]);
-				uncompressedBufferEmptySemaphores[i] = NULL;
-			}
-		}
-		delete [] uncompressedBufferEmptySemaphores;
-		uncompressedBufferEmptySemaphores = NULL;
-	}
+	 if(uncompressedBufferEmptySemaphores != NULL){
+		 for(i = 0; i < (int)nThreads; i++){
+			 if(uncompressedBufferEmptySemaphores[i]){
+				 CloseHandle(uncompressedBufferEmptySemaphores[i]);
+				 uncompressedBufferEmptySemaphores[i] = NULL;
+			 }
+		 }
+		 delete [] uncompressedBufferEmptySemaphores;
+		 uncompressedBufferEmptySemaphores = NULL;
+	 }
 
-	if(uncompressedBufferFilledSemaphores != NULL){
-		for(i = 0; i < nThreads; i++){
-			if(uncompressedBufferFilledSemaphores[i]){
-				CloseHandle(uncompressedBufferFilledSemaphores[i]);
-				uncompressedBufferFilledSemaphores[i] = NULL;
-			}
-		}
-		delete [] uncompressedBufferFilledSemaphores;
-		uncompressedBufferFilledSemaphores = NULL;
-	}
+	 if(uncompressedBufferFilledSemaphores != NULL){
+		 for(i = 0; i < (int)nThreads; i++){
+			 if(uncompressedBufferFilledSemaphores[i]){
+				 CloseHandle(uncompressedBufferFilledSemaphores[i]);
+				 uncompressedBufferFilledSemaphores[i] = NULL;
+			 }
+		 }
+		 delete [] uncompressedBufferFilledSemaphores;
+		 uncompressedBufferFilledSemaphores = NULL;
+	 }
 
-	if(compressedBufferEmptySemaphores != NULL){
-		for(i = 0; i < nThreads; i++){
-			if(compressedBufferEmptySemaphores[i]){
-				CloseHandle(compressedBufferEmptySemaphores[i]);
-				compressedBufferEmptySemaphores[i] = NULL;
-			}
-		}
-		delete [] compressedBufferEmptySemaphores;
-		compressedBufferEmptySemaphores = NULL;
-	}
+	 if(compressedBufferEmptySemaphores != NULL){
+		 for(i = 0; i < (int)nThreads; i++){
+			 if(compressedBufferEmptySemaphores[i]){
+				 CloseHandle(compressedBufferEmptySemaphores[i]);
+				 compressedBufferEmptySemaphores[i] = NULL;
+			 }
+		 }
+		 delete [] compressedBufferEmptySemaphores;
+		 compressedBufferEmptySemaphores = NULL;
+	 }
 
-	if(compressedBufferFilledSemaphores != NULL){
-		for(i = 0; i < nThreads; i++){
-			if(compressedBufferFilledSemaphores[i]){
-				CloseHandle(compressedBufferFilledSemaphores[i]);
-				compressedBufferFilledSemaphores[i] = NULL;
-			}
-		}
-		delete [] compressedBufferFilledSemaphores;
-		compressedBufferFilledSemaphores = NULL;
-	}
+	 if(compressedBufferFilledSemaphores != NULL){
+		 for(i = 0; i < (int)nThreads; i++){
+			 if(compressedBufferFilledSemaphores[i]){
+				 CloseHandle(compressedBufferFilledSemaphores[i]);
+				 compressedBufferFilledSemaphores[i] = NULL;
+			 }
+		 }
+		 delete [] compressedBufferFilledSemaphores;
+		 compressedBufferFilledSemaphores = NULL;
+	 }
 
-	if(threadBufferIndex != NULL){
-		delete [] threadBufferIndex;
-		threadBufferIndex = NULL;
-	}
+	 if(threadBufferIndex != NULL){
+		 delete [] threadBufferIndex;
+		 threadBufferIndex = NULL;
+	 }
 
-	if(keyFrameWritten != NULL){
-		CloseHandle(keyFrameWritten);
-		keyFrameWritten = NULL;
-	}
+	 if(keyFrameWritten != NULL){
+		 CloseHandle(keyFrameWritten);
+		 keyFrameWritten = NULL;
+	 }
 
-	if(stats){
-		delete stats;
-		stats = NULL;
-		logger->log(UFMF_DEBUG_3,"deleted stats\n");
-	}
+	 if(stats){
+		 delete stats;
+		 stats = NULL;
+		 logger->log(UFMF_DEBUG_3,"deleted stats\n");
+	 }
+}
+
+// ************** helper functions *************************
+
+char* strtrim(char *aString)
+{
+    int i;
+    int lLength = strlen(aString);
+    char* lOut = aString;
+    
+    // trim right
+    for(i=lLength-1;i>=0;i--)   
+        if(isspace(aString[i]))
+            aString[i]='\0';
+        else
+            break;
+                
+    lLength = strlen(aString);    
+        
+    // trim left
+    for(i=0;i<lLength;i++)
+        if(isspace(aString[i]))
+            lOut = &aString[i+1];    
+        else
+            break;    
+    
+    return lOut;
 }

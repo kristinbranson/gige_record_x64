@@ -7,7 +7,7 @@
 #include <vector>
 #include <math.h>
 #include <time.h>
-#define MAXWAITTIMEMS 10000
+#define MAXWAITTIMEMS 20000
 
 class BackgroundModel {
 
@@ -91,6 +91,13 @@ public:
 	// common code for both the empty constructor and the parameter-filled constructor
 	void init();
 
+	// common code for parameter-filled constructors
+	void init(const char * fileName, unsigned __int32 pWidth, unsigned __int32 pHeight, unsigned __int32 nBuffers = 10,
+		int MaxBGNFrames = 100, double BGUpdatePeriod = 1.0, double BGKeyFramePeriod = 100, unsigned __int32 boxLength = 30,
+		double backSubThresh = 10.0, unsigned __int32 nFramesInit = 100, double* BGKeyFramePeriodInit = NULL, int BGKeyFramePeriodInitLength = 0, 
+		double maxFracFgCompress = 1.0, const char *statFileName=NULL, bool printStats=true, int statStreamPrintFreq=1, bool statPrintFrameErrors=true, 
+		bool statPrintTimings=true, int statComputeFrameErrorFreq=1, unsigned __int32 nThreads=4);
+
 	// empty constructor:
 	// initializes values to defaults
 	ufmfWriter();
@@ -124,8 +131,9 @@ public:
 		int MaxBGNFrames = 100, double BGUpdatePeriod = 1.0, double BGKeyFramePeriod = 100, unsigned __int32 boxLength = 30,
 		double backSubThresh = 10.0, unsigned __int32 nFramesInit = 100, double* BGKeyFramePeriodInit = NULL, int BGKeyFramePeriodInitLength = 0, 
 		double maxFracFgCompress = 1.0, const char *statFileName=NULL, bool printStats=true, int statStreamPrintFreq=1, bool statPrintFrameErrors=true, 
-		bool statPrintTimings=true, int statComputeFrameErrorFreq=1, int nThreads=4);
+		bool statPrintTimings=true, int statComputeFrameErrorFreq=1, unsigned __int32 nThreads=4);
 
+	ufmfWriter(const char * fileName, unsigned __int32 pWidth, unsigned __int32 pHeight, FILE* logFID, const char * paramsFile);
 
 	// destructor
 	~ufmfWriter();
@@ -153,7 +161,7 @@ public:
 	void setVideoParams(char * fileName, int wWidth, int wHeight);
 
 	// set video compression parameters
-	bool readParamsFile(char * paramsFile);
+	bool readParamsFile(const char * paramsFile);
 
 	// read stats params from a file
 	void setStatsParams(const char * statsName);
@@ -307,7 +315,7 @@ private:
 
 	// *** threading parameters ***
 
-	int nThreads; // number of compression threads
+	unsigned __int32 nThreads; // number of compression threads
 	unsigned __int32 nBuffers; // number of frames buffered
 
 	// *** video parameters ***
