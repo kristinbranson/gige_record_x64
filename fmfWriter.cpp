@@ -57,13 +57,12 @@ unsigned __int64 fmfWriter::stopWrite(){
 
 	return nWritten;
 }
-bool fmfWriter::addFrame(char * frame, unsigned long timestampHi, unsigned long timestampLo){
+bool fmfWriter::addFrame(char * frame, double timestamp){
 
 	nWritten++;
 
 	// write timestamp
-	fwrite(&timestampHi,4,1,pFile);
-	fwrite(&timestampLo,4,1,pFile);
+	fwrite(&timestamp,8,1,pFile);
 						
 	//Write entire frame at once
 	fwrite(frame,1,wWidth*wHeight,pFile);

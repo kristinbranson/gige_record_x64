@@ -1,3 +1,6 @@
-recordTimeSeconds = 100
-videoFileName = C:\Code\imaq\gige_record_x64\out\test1.avi
-nFramesBuffer = 1000
+recordTimeSeconds = 200
+videoFileName = C:\Code\imaq\gige_record_x64\out\test1.ufmf
+nFramesBuffer = 2000
+videoFormat = UFMF
+videoParamFileName = C:\Code\imaq\gige_record_x64\testVideoParams.txt
+previewUpdatePeriod = 1

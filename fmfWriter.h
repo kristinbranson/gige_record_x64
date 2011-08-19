@@ -13,7 +13,7 @@ public:
 		unsigned __int64 nWritten; //Track number of frames written to disk
 		
 		bool startWrite(const char * fileName, unsigned __int32 pWidth, unsigned __int32 pHeight, FILE* out);
-		bool addFrame(char * frame, unsigned long timestampHi, unsigned long timestampLo);
+		bool addFrame(char * frame, double timestamp);
 		unsigned __int64 stopWrite();
 
 //private:

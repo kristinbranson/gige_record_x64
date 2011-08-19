@@ -2,9 +2,6 @@
 #include <stdio.h>
 #include "ufmfWriter.h"
 
-// prototypes of helper functions
-char * strtrim(char *aString);
-
 // ************************* BackgroundModel **************************
 
 void BackgroundModel::init(){
@@ -59,13 +56,15 @@ BackgroundModel::~BackgroundModel(){
 		delete [] BGCenter; BGCenter = NULL;
 	}
 	if(BGCounts != NULL){
-		for(int i = 0; i < nPixels; i++){
-			if(BGCounts[i] != NULL){
-				delete [] BGCounts[i]; BGCounts[i] = NULL;
-			}
-		}
+		//for(int i = 0; i < nPixels; i++){
+		//	if(BGCounts[i] != NULL){
+		//		if((i%1000)==0) fprintf(stderr,"Deleting BGCounts[%d]\n",i);
+		//		delete [] BGCounts[i]; BGCounts[i] = NULL;
+		//	}
+		//}
 		delete [] BGCounts; BGCounts = NULL;
 	}
+	fprintf(stderr,"Deallocated bgcounts\n");
 	nPixels = 0;
 	BGZ = 0;
 	nFramesAdded = 0;
@@ -135,6 +134,9 @@ void CompressedFrame::init(){
 	nWrites = NULL;
 	timestamp = -1;
 	ncc = 0;
+	numFore = 0;
+	isCompressed = false;
+	numPxWritten = 0;
 	frameNumber = 0;
 
 	boxLength = 30; // length of foreground boxes to store
@@ -220,13 +222,13 @@ bool CompressedFrame::setData(unsigned __int8 * im, double timestamp, unsigned _
 	int i;
 	int j;
 	int i1;
-	int numFore = 0;
-	int numPxWritten = -1;
+	numFore = 0;
+	numPxWritten = -1;
 
 	_int64 filePosStart;
 	_int64 filePosEnd;
-	_int64 frameSizeBytes;
-	bool isCompressed;
+	//_int64 frameSizeBytes;
+	//bool isCompressed;
 
 	this->timestamp = timestamp;
 	this->frameNumber = frameNumber;
@@ -350,29 +352,32 @@ void ufmfWriter::init(){
 
 	// *** threading/buffering state ***
 	uncompressedFrames = NULL;
-	uncompressedBufferTimestamps = NULL;
 	compressedFrames = NULL;
+	threadTimestamps = NULL;
 	nUncompressedFramesBuffered = 0;
 	nCompressedFramesBuffered = 0;
+	readyToWrite = NULL;
 
 	_compressionThreads = NULL;
 	_compressionThreadIDs = NULL;
 	compressionThreadReadySignals = NULL;
+	compressionThreadStartSignals = NULL;
+	compressionThreadDoneSignals = NULL;
 	threadCount = 0;
-	uncompressedBufferEmptySemaphores = NULL;
-	uncompressedBufferFilledSemaphores = NULL;
-	compressedBufferEmptySemaphores = NULL;
-	compressedBufferFilledSemaphores = NULL;
-	uncompressedBufferFrameNumbers = NULL;
-	threadBufferIndex = NULL;
+	threadFrameNumbers = NULL;
 
 	// *** background subtraction state ***
 	bg = NULL;
+	minFrameBGModel0 = 0;
 	minFrameBGModel1 = 0;
 	BGLowerBound0 = NULL;
 	BGUpperBound0 = NULL;
+	BGCenter0 = NULL;
+	keyframeTimestamp0 = -1;
 	BGLowerBound1 = NULL;
 	BGUpperBound1 = NULL;
+	BGCenter1 = NULL;
+	keyframeTimestamp1 = -1;
 	lastBGUpdateTime = -1;
 	lastBGKeyFrameTime = -1;
 
@@ -382,7 +387,6 @@ void ufmfWriter::init(){
 
 	// *** threading parameter defaults ***
 	nThreads = 4;
-	nBuffers = 10;
 
 	// *** video parameter defaults ****
 	strcpy(fileName,"");
@@ -424,6 +428,9 @@ void ufmfWriter::init(){
 	statPrintTimings = true;
 	statComputeFrameErrorFreq = 1;
 
+	// *** logging parameters ***
+	UFMFDEBUGLEVEL = UFMF_DEBUG_3;
+
 }
 
 // empty constructor:
@@ -432,7 +439,7 @@ ufmfWriter::ufmfWriter(){
 	init();
 }
 
-void ufmfWriter::init(const char * fileName, unsigned __int32 pWidth, unsigned __int32 pHeight, unsigned __int32 nBuffers,
+void ufmfWriter::init(const char * fileName, unsigned __int32 pWidth, unsigned __int32 pHeight, 
 	int MaxBGNFrames, double BGUpdatePeriod, double BGKeyFramePeriod, unsigned __int32 boxLength,
 	double backSubThresh, unsigned __int32 nFramesInit, double* BGKeyFramePeriodInit, int BGKeyFramePeriodInitLength, double maxFracFgCompress, 
 	const char *statFileName, bool printStats, int statStreamPrintFreq, bool statPrintFrameErrors, bool statPrintTimings, 
@@ -444,10 +451,6 @@ void ufmfWriter::init(const char * fileName, unsigned __int32 pWidth, unsigned _
 
 		// *** threading parameters ***
 		this->nThreads = nThreads;
-		if(nBuffers < nThreads)
-			this->nBuffers = nThreads;
-		else
-			this->nBuffers = nBuffers;
 
 		// *** video parameters ***
 		strcpy(this->fileName, fileName);
@@ -492,33 +495,29 @@ void ufmfWriter::init(const char * fileName, unsigned __int32 pWidth, unsigned _
 		// ***** allocate stuff *****
 
 		// *** threading/buffering state ***
-		uncompressedFrames = new unsigned char*[nBuffers];
-		for(i = 0; i < (int)nBuffers; i++){
+		uncompressedFrames = new unsigned char*[nThreads];
+		for(i = 0; i < (int)nThreads; i++){
 			uncompressedFrames[i] = new unsigned char[nPixels];
 			memset(uncompressedFrames[i],0,nPixels*sizeof(char));
 		}
-		uncompressedBufferTimestamps = new double[nBuffers];
-		memset(uncompressedBufferTimestamps,0,nBuffers*sizeof(double));
-		uncompressedBufferFrameNumbers = new unsigned __int64[nBuffers];
-		memset(uncompressedBufferFrameNumbers,0,nBuffers*sizeof(unsigned __int64));
-		compressedFrames = new CompressedFrame*[nBuffers];
-		for(i = 0; i < (int)nBuffers; i++){
+		compressedFrames = new CompressedFrame*[nThreads];
+		for(i = 0; i < (int)nThreads; i++){
 			compressedFrames[i] = new CompressedFrame(wWidth,wHeight,boxLength,maxFracFgCompress);
 		}
+		threadTimestamps = new double[nThreads];
+		memset(threadTimestamps,0,nThreads*sizeof(double));
+		threadFrameNumbers = new unsigned __int64[nThreads];
+		memset(threadFrameNumbers,0,nThreads*sizeof(unsigned __int64));
+
+		readyToWrite = new int[nThreads];
+		memset(readyToWrite,0,nThreads*sizeof(int));
 
 		// allocate compression thread stuff
 		_compressionThreads = new HANDLE[nThreads];
 		_compressionThreadIDs = new DWORD[nThreads];
 		compressionThreadReadySignals = new HANDLE[nThreads];
 		compressionThreadStartSignals = new HANDLE[nThreads];
-		threadBufferIndex = new int[nThreads];
-		memset(threadBufferIndex,0,nThreads*sizeof(int));
-
-		// allocate semaphores
-		uncompressedBufferEmptySemaphores = new HANDLE[nBuffers];
-		uncompressedBufferFilledSemaphores = new HANDLE[nBuffers];
-		compressedBufferEmptySemaphores = new HANDLE[nBuffers];
-		compressedBufferFilledSemaphores = new HANDLE[nBuffers];
+		compressionThreadDoneSignals = new HANDLE[nThreads];
 
 		//// *** background subtraction state ***
 		bg = new BackgroundModel(nPixels,nBGUpdatesPerKeyFrame);
@@ -526,10 +525,19 @@ void ufmfWriter::init(const char * fileName, unsigned __int32 pWidth, unsigned _
 		memset(BGLowerBound0,0,nPixels*sizeof(unsigned __int8));
 		BGUpperBound0 = new unsigned __int8[nPixels]; // per-pixel upper bound on background
 		memset(BGUpperBound0,0,nPixels*sizeof(unsigned __int8));
+		if(printStats){
+			BGCenter0 = new float[nPixels]; 
+			memset(BGCenter0,0,nPixels*sizeof(float));
+		}
+
 		BGLowerBound1 = new unsigned __int8[nPixels]; // per-pixel lower bound on background
 		memset(BGLowerBound1,0,nPixels*sizeof(unsigned __int8));
 		BGUpperBound1 = new unsigned __int8[nPixels]; // per-pixel upper bound on background
 		memset(BGUpperBound1,0,nPixels*sizeof(unsigned __int8));
+		if(printStats){
+			BGCenter1 = new float[nPixels]; 
+			memset(BGCenter1,0,nPixels*sizeof(float));
+		}
 
 		// *** logging state ***
 		if(printStats) {
@@ -548,8 +556,6 @@ void ufmfWriter::init(const char * fileName, unsigned __int32 pWidth, unsigned _
 // pWidth: width of frame
 // pHeight: height of frame
 // [acquisition parameters:]
-// nBuffers: number of frames to buffer between acquiring and writing
-// [compression parameters:]
 // MaxBGNFrames: approximate number of frames used in background computation
 // BGUpdatePeriod: seconds between updates to the background model
 // BGKeyFramePeriod: seconds between background keyframes
@@ -566,18 +572,18 @@ void ufmfWriter::init(const char * fileName, unsigned __int32 pWidth, unsigned _
 // statPrintTimings: whether to print information about the time each part of the computation takes. 
 // nThreads: number of threads to allocate to compress frames simultaneously
 
-ufmfWriter::ufmfWriter(const char * fileName, unsigned __int32 pWidth, unsigned __int32 pHeight, FILE * logFID, unsigned __int32 nBuffers,
+ufmfWriter::ufmfWriter(const char * fileName, unsigned __int32 pWidth, unsigned __int32 pHeight, FILE * logFID, 
 	int MaxBGNFrames, double BGUpdatePeriod, double BGKeyFramePeriod, unsigned __int32 boxLength,
 	double backSubThresh, unsigned __int32 nFramesInit, double* BGKeyFramePeriodInit, int BGKeyFramePeriodInitLength, double maxFracFgCompress, 
 	const char *statFileName, bool printStats, int statStreamPrintFreq, bool statPrintFrameErrors, bool statPrintTimings, 
 	int statComputeFrameErrorFreq, unsigned __int32 nThreads){
 
-
+	init();
 	// *** logging state ***
 	this->logFID = logFID;
-	logger = new ufmfLogger(logFID,UFMF_DEBUG_7);
+	logger = new ufmfLogger(logFID,UFMFDEBUGLEVEL);
 
-	init(fileName, pWidth, pHeight, nBuffers, MaxBGNFrames, BGUpdatePeriod, BGKeyFramePeriod,
+	init(fileName, pWidth, pHeight, MaxBGNFrames, BGUpdatePeriod, BGKeyFramePeriod,
 		boxLength, backSubThresh, nFramesInit, BGKeyFramePeriodInit, BGKeyFramePeriodInitLength, 
 		maxFracFgCompress, statFileName, printStats, statStreamPrintFreq, statPrintFrameErrors, 
 		statPrintTimings, statComputeFrameErrorFreq, nThreads);
@@ -590,9 +596,9 @@ ufmfWriter::ufmfWriter(const char * fileName, unsigned __int32 pWidth, unsigned 
 	init();
 	// *** logging state ***
 	this->logFID = logFID;
-	logger = new ufmfLogger(logFID,UFMF_DEBUG_7);
+	logger = new ufmfLogger(logFID,UFMFDEBUGLEVEL);
 	readParamsFile(paramsFile);
-	init(fileName, pWidth, pHeight, nBuffers, MaxBGNFrames, BGUpdatePeriod, BGKeyFramePeriod,
+	init(fileName, pWidth, pHeight, MaxBGNFrames, BGUpdatePeriod, BGKeyFramePeriod,
 		boxLength, backSubThresh, nFramesInit, BGKeyFramePeriodInit, BGKeyFramePeriodInitLength, 
 		maxFracFgCompress, statFileName, printStats, statStreamPrintFreq, statPrintFrameErrors, 
 		statPrintTimings, statComputeFrameErrorFreq, nThreads);
@@ -602,6 +608,8 @@ ufmfWriter::ufmfWriter(const char * fileName, unsigned __int32 pWidth, unsigned 
  ufmfWriter::~ufmfWriter(){
 
 	 int i;
+
+	 logger->log(UFMF_DEBUG_3,"Destructor\n");
 
 	 // stop writing if writing
 
@@ -616,11 +624,17 @@ ufmfWriter::ufmfWriter(const char * fileName, unsigned __int32 pWidth, unsigned 
 	 // buffers for compressed, uncompressed frames
 	 deallocateBuffers();
 
+	 logger->log(UFMF_DEBUG_3,"Deallocated buffers\n");
+
 	 // background model
 	 deallocateBGModel();
 
+	 logger->log(UFMF_DEBUG_3,"Deallocated bg model\n");
+
 	 // threading stuff
 	 deallocateThreadStuff();
+
+	 logger->log(UFMF_DEBUG_3,"Deallocated thread stuff\n");
 
 	 nGrabbed = 0;
 	 nWritten = 0;
@@ -631,6 +645,8 @@ ufmfWriter::ufmfWriter(const char * fileName, unsigned __int32 pWidth, unsigned 
 		stats = NULL;
 		logger->log(UFMF_DEBUG_3,"deleted stats in destructor\n");
 	}
+
+	 logger->log(UFMF_DEBUG_3,"done with destructor\n");
 
 }
 
@@ -672,55 +688,29 @@ bool ufmfWriter::startWrite(){
 	}
 
 	// compression semaphores
-	for(i = 0; i < (int)nBuffers; i++){
-		// initialize value to 1 to signify empty
-		uncompressedBufferEmptySemaphores[i] = CreateSemaphore(NULL,1,1,NULL);
-		if(uncompressedBufferEmptySemaphores[i] == NULL){
-			logger->log(UFMF_ERROR,"Error creating uncompressedBufferEmptySemaphores[%d] semaphore\n",i);
-			return false;
-		}
+	for(i = 0; i < (int)nThreads; i++){
 
-		// initialize value to 0 to signify not filled
-		uncompressedBufferFilledSemaphores[i] = CreateSemaphore(NULL,0,1,NULL);
-		if(uncompressedBufferFilledSemaphores[i] == NULL){
-			logger->log(UFMF_ERROR,"Error creating uncompressedBufferFilledSemaphores[%d] semaphore\n",i);
-			return false;
-		}
-
-		// initialize value to 1 to signify empty
-		compressedBufferEmptySemaphores[i] = CreateSemaphore(NULL,1,1,NULL);
-		if(compressedBufferEmptySemaphores[i] == NULL){
-			logger->log(UFMF_ERROR,"Error creating compressedBufferEmptySemaphores[%d] semaphore\n",i);
-			return false;
-		}
-
-		// initialize value to 0 to signify not filled
-		compressedBufferFilledSemaphores[i] = CreateSemaphore(NULL,0,1,NULL);
-		if(compressedBufferFilledSemaphores[i] == NULL){
-			logger->log(UFMF_ERROR,"Error creating compressedBufferFilledSemaphores[%d] semaphore\n",i);
-			return false;
-		}
-
-		// initialize that compression threads are not ready
+		// initialize that compression threads are not ready for processing
 		compressionThreadReadySignals[i] = CreateSemaphore(NULL,0,1,NULL);
 		if(compressionThreadReadySignals[i] == NULL){
 			logger->log(UFMF_ERROR,"Error creating compressionThreadReadySignals[%d] semaphore\n",i);
 			return false;
 		}
 
-		// initialize not to start compression threads
+		// initialize not ready to start compression threads
 		compressionThreadStartSignals[i] = CreateSemaphore(NULL,0,1,NULL);
 		if(compressionThreadStartSignals[i] == NULL){
 			logger->log(UFMF_ERROR,"Error creating compressionThreadStartSignals[%d] semaphore\n",i);
 			return false;
 		}
-	}
 
-	// compression manager thread semaphore
-	compressionThreadManagerReadySignal = CreateSemaphore(NULL,0,1,NULL);
-	if(compressionThreadManagerReadySignal == NULL){
-		logger->log(UFMF_ERROR,"Error creating compressionThreadManagerReadySignal semaphore\n");
-		return false;
+		// initialize value to 0 to signify not finished compressing
+		compressionThreadDoneSignals[i] = CreateSemaphore(NULL,0,1,NULL);
+		if(compressionThreadDoneSignals[i] == NULL){
+			logger->log(UFMF_ERROR,"Error creating compressionThreadDoneSignals[%d] semaphore\n",i);
+			return false;
+		}
+
 	}
 
 	// writing thread semaphore
@@ -738,15 +728,6 @@ bool ufmfWriter::startWrite(){
 	}
 
 	isWriting = true;
-	// start compression thread manager
-	_compressionThreadManager = CreateThread(NULL,0,compressionThreadManager,this,0,&_compressionThreadManagerID);
-	if ( _compressionThreadManager == NULL ){ 
-		return false; 
-	}
-	if(WaitForSingleObject(compressionThreadManagerReadySignal, MAXWAITTIMEMS) != WAIT_OBJECT_0) { 
-		logger->log(UFMF_ERROR,"Error Starting Compression Manager Thread\n"); 
-		return false; 
-	}
 
 	// start compression threads
 	for(i = 0; i < (int)nThreads; i++){
@@ -808,51 +789,38 @@ unsigned __int64 ufmfWriter::stopWrite(){
 
 	if(stats){
 		stats->updateTimings(UTT_STOP_WRITE,stats_t0);
+		stats->printSummary();
+		stats->flushNow();
 	}
 
 	return nWritten;
 }
 
 // add a frame to the processing queue
-bool ufmfWriter::addFrame(unsigned char * frame, double timestamp){
+bool ufmfWriter::addFrame(unsigned char * frame, double timestamp, unsigned __int64 nFramesDroppedExternal, unsigned __int64 nFramesBufferedExternal){
 
-	int bufferIndex;
+	int threadIndex;
 	unsigned __int64 frameNumber;
-	ULARGE_INTEGER stats_t0;
+	ULARGE_INTEGER stats_t0, stats_t1;
+
 	if(stats){
-		stats_t0 = ufmfWriterStats::getTime();
+		stats_t1 = ufmfWriterStats::getTime();
 	}
 
-	// wait for any uncompressed frame to be empty
-	bufferIndex = (int)WaitForMultipleObjects((DWORD)nBuffers,uncompressedBufferEmptySemaphores,false,MAXWAITTIMEMS) - (int)WAIT_OBJECT_0;
-	if(bufferIndex < 0 || bufferIndex >= (int)nBuffers){
-		logger->log(UFMF_ERROR,"Error waiting for a frame to be added: %x\n",bufferIndex+WAIT_OBJECT_0);
-		return false;
-	}
-
-	// store that this buffer contains current frame
 	nGrabbed++;
 	frameNumber = nGrabbed;
-	logger->log(UFMF_DEBUG_7,"Adding frame %d\n",frameNumber);
 
-	uncompressedBufferFrameNumbers[bufferIndex] = frameNumber;
-	Lock();
-	nUncompressedFramesBuffered++;
-	Unlock();
-
-	if(stats){
-		stats->updateTimings(UTT_WAIT_FOR_ADDED_FRAME,stats_t0);
-	}
+	logger->log(UFMF_DEBUG_7,"Adding frame %llu\n",frameNumber);
 
 	// update background counts if necessary
 	if(!addToBGModel(frame,timestamp,frameNumber)){
-		logger->log(UFMF_ERROR,"Error adding frame to background model");
+		logger->log(UFMF_ERROR,"Error adding frame to background model\n");
 		return false;
 	}
 
 	// reset background model if necessary, signal to write key frame
 	if(!updateBGModel(frame,timestamp,frameNumber)){
-		logger->log(UFMF_ERROR,"Error computing new background model");
+		logger->log(UFMF_ERROR,"Error computing new background model\n");
 		return false;
 	}
 
@@ -860,15 +828,36 @@ bool ufmfWriter::addFrame(unsigned char * frame, double timestamp){
 		stats_t0 = ufmfWriterStats::getTime();
 	}
 
-	// copy over the data
-	memcpy(uncompressedFrames[bufferIndex],frame,nPixels*sizeof(unsigned char));
-	uncompressedBufferTimestamps[bufferIndex] = timestamp;
-
-	// signal that the uncompressed buffer is filled
-	ReleaseSemaphore(uncompressedBufferFilledSemaphores[bufferIndex],1,NULL);
+	// wait for a compression thread to be ready
+	threadIndex = (int)WaitForMultipleObjects((DWORD)nThreads,compressionThreadReadySignals,false,MAXWAITTIMEMS);
+	if(threadIndex < 0 || threadIndex >= (int)nThreads){
+		logger->log(UFMF_ERROR,"Error waiting for a thread to be ready when adding a frame: %x\n",threadIndex+WAIT_OBJECT_0);
+		return false;
+	}
 
 	if(stats){
-		stats->updateTimings(UTT_ADD_FRAME,stats_t0);
+		stats_t0 = stats->updateTimings(UTT_WAIT_FOR_COMPRESS_THREAD,stats_t0);
+	}
+
+	// store this frame for this thread
+	threadFrameNumbers[threadIndex] = frameNumber;
+	logger->log(UFMF_DEBUG_7,"Adding frame %d to thread %d\n",frameNumber,threadIndex);
+	Lock();
+	nUncompressedFramesBuffered++;
+	this->nFramesDroppedExternal = nFramesDroppedExternal;
+	this->nFramesBufferedExternal = nFramesBufferedExternal;
+	Unlock();
+
+	// copy over the data
+	memcpy(uncompressedFrames[threadIndex],frame,nPixels*sizeof(unsigned char));
+	threadTimestamps[threadIndex] = timestamp;
+
+	// signal that the compression thread can start
+	logger->log(UFMF_DEBUG_7,"Signaling that thread %d can start compressing frame %llu\n",threadIndex,frameNumber);
+	ReleaseSemaphore(compressionThreadStartSignals[threadIndex],1,NULL);
+
+	if(stats){
+		stats->updateTimings(UTT_ADD_FRAME,stats_t1);
 	}
 
 	return true;
@@ -913,10 +902,7 @@ bool ufmfWriter::readParamsFile(const char * paramsFile){
 			logger->log(UFMF_ERROR,"Error opening parameter file %s for reading.\n",paramsFile);
 		return failure;
 	}
-	//init(fileName, pWidth, pHeight, logFID, nBuffers, MaxBGNFrames, BGUpdatePeriod, BGKeyFramePeriod,
-	//	boxLength, backSubThresh, nFramesInit, BGKeyFramePeriodInit, BGKeyFramePeriodInitLength, 
-	//	maxFracFgCompress, statFileName, printStats, statStreamPrintFreq, statPrintFrameErrors, 
-	//	statPrintTimings, statComputeFrameErrorFreq, nThreads);
+
 	while(true){
 		if(fgets(line,maxsz,fp) == NULL) break;
 
@@ -950,7 +936,7 @@ bool ufmfWriter::readParamsFile(const char * paramsFile){
 
 		// maximum fraction of pixels that can be foreground to try compressing frame
 		if(strcmp(paramName,"UFMFNBuffers") == 0){
-			this->nBuffers = (unsigned __int32)paramValue;
+			//this->nBuffers = (unsigned __int32)paramValue;
 		}
 		else if(strcmp(paramName,"UFMFMaxFracFgCompress") == 0){
 			this->maxFracFgCompress = paramValue;
@@ -1038,7 +1024,7 @@ void ufmfWriter::setStatsParams(const char * statsName){
 // *** writing tools ***
 
 // write a frame
-bool ufmfWriter::writeFrame(CompressedFrame * im){
+__int64 ufmfWriter::writeFrame(CompressedFrame * im){
 
 	ULARGE_INTEGER stats_t0;
 	if(stats){
@@ -1049,7 +1035,7 @@ bool ufmfWriter::writeFrame(CompressedFrame * im){
 	_int64 filePosStart;
 	_int64 filePosEnd;
 	_int64 frameSizeBytes;
-	bool isCompressed;
+	//bool isCompressed;
 
 	logger->log(UFMF_DEBUG_7,"writing compressed frame %d\n",im->frameNumber);
 
@@ -1087,14 +1073,14 @@ bool ufmfWriter::writeFrame(CompressedFrame * im){
 
 	//if(stats) {
 	//	stats->updateTimings(UTT_COMPUTE_STATS);
-	//	stats->update(index, index_timestamp, frameSizeBytes, isCompressed, numFore, numPxWritten, ncc, numBuffered, numDropped, nWrites, wWidth*wHeight, im, BGCenter, UFMF_DEBUG_3);
+	//	stats->update(index, index_timestamp, frameSizeBytes, isCompressed, im->numFore, im->numPxWritten, im->ncc, nUncompressedFramesBuffered, 0, im->nWrites, nPixels, uncompressedFrame, BGCenter, UFMF_DEBUG_3);
 	//}
 
 	if(stats){
 		stats->updateTimings(UTT_WRITE_FRAME,stats_t0);
 	}
 
-	return true;
+	return frameSizeBytes;
 }
 
 // write the video header
@@ -1367,7 +1353,7 @@ bool ufmfWriter::finishWriting(){
 	return true;
 }
 
-bool ufmfWriter::writeBGKeyFrame(){
+bool ufmfWriter::writeBGKeyFrame(float* BGCenter,double keyframeTimestamp){
 
 	ULARGE_INTEGER stats_t0;
 	if(stats){
@@ -1377,7 +1363,6 @@ bool ufmfWriter::writeBGKeyFrame(){
 	int i, j;
 	unsigned __int32 countscurr;
 
-	//if(stats) stats->updateTimings(UTT_WRITE_KEYFRAME);
 	logger->log(UFMF_DEBUG_7,"writing keyframe\n");
 
 	// add to keyframe index
@@ -1404,12 +1389,11 @@ bool ufmfWriter::writeBGKeyFrame(){
 	// timestamp
 	fwrite(&keyframeTimestamp,8,1,pFile);
 
-	// write the frame
-	fwrite(bg->BGCenter,4,nPixels,pFile);
-	// signal that we've written the key frame
-	ReleaseSemaphore(keyFrameWritten,1,NULL);
-
 	Lock();
+
+	// write the frame
+	fwrite(BGCenter,4,nPixels,pFile);
+
 	nBGKeyFramesWritten++;
 	Unlock();
 
@@ -1417,7 +1401,6 @@ bool ufmfWriter::writeBGKeyFrame(){
 		stats->updateTimings(UTT_WRITE_KEYFRAME,stats_t0);
 	}
 
-	//if(stats) stats->updateTimings(UTT_NONE);
 	return true;
 }
 
@@ -1460,9 +1443,11 @@ bool ufmfWriter::updateBGModel(unsigned __int8 * frame, double timestamp, unsign
 	double dt = timestamp - lastBGKeyFrameTime;
 	double BGKeyFramePeriodCurr = BGKeyFramePeriod;
 	unsigned __int64 nBGKeyFramesWrittenCurr;
+	unsigned __int64 minFrameBGModel1Copy;
 
 	Lock();
 	nBGKeyFramesWrittenCurr = nBGKeyFramesWritten;
+	minFrameBGModel1Copy = minFrameBGModel1;
 	Unlock();
 
 	if(nBGKeyFramesWrittenCurr > 0 && nBGKeyFramesWrittenCurr <= BGKeyFramePeriodInitLength){
@@ -1481,20 +1466,26 @@ bool ufmfWriter::updateBGModel(unsigned __int8 * frame, double timestamp, unsign
 	}
 
 	logger->log(UFMF_DEBUG_7,"Updating background model at frame %d\n",frameNumber);
+	//logger->log(UFMF_DEBUG_7,"waiting for keyframe %llu to be written\n",minFrameBGModel1Copy);
 	
 	// wait until the last key frame has been written
-	if(WaitForSingleObject(keyFrameWritten,MAXWAITTIMEMS) != WAIT_OBJECT_0){
-		logger->log(UFMF_ERROR,"Timeout waiting for last keyframe to be written.\n");
+	//if(WaitForSingleObject(keyFrameWritten,MAXWAITTIMEMS) != WAIT_OBJECT_0){
+	//	logger->log(UFMF_ERROR,"Timeout waiting for last keyframe to be written.\n");
+	//	return false;
+	//}
+
+	// update the model
+	if(!bg->updateModel()){
+		logger->log(UFMF_ERROR,"Error computing background model\n");
 		return false;
 	}
-	// update the model
-	bg->updateModel();
 
 	Lock();
 
 	// sanity check: no frames should need to be written that are still using bound0
 	time_t startTime = time(NULL);
 	while(nWritten < minFrameBGModel1){
+		logger->log(UFMF_DEBUG_7,"Waiting for all frames using BGModel0 to be written\n");
 		Unlock();
 		Sleep(100);
 		if(difftime(time(NULL),startTime) > MAXWAITTIMEMS/1000.0){
@@ -1508,15 +1499,21 @@ bool ufmfWriter::updateBGModel(unsigned __int8 * frame, double timestamp, unsign
 
 	// update using old buffer, which is bound0
 	float tmp;
-	for(int i = 0; i < nPixels; i++){
+	int i;
+	for(i = 0; i < nPixels; i++){
 		tmp = ceil(bg->BGCenter[i] - backSubThresh);
 		if(tmp < 0) BGLowerBound0[i] = 0;
 		else if(tmp > 255) BGLowerBound0[i] = 255;
 		else BGLowerBound0[i] = (unsigned __int8)tmp;
+	}
+	for(i = 0; i < nPixels; i++){
 		tmp = floor(bg->BGCenter[i] + backSubThresh);
 		if(tmp < 0) BGUpperBound0[i] = 0;
 		else if(tmp > 255) BGUpperBound0[i] = 255;
 		else BGUpperBound0[i] = (unsigned __int8)tmp;
+	}
+	if(stats){
+		memcpy(BGCenter0,bg->BGCenter,nPixels*sizeof(float));
 	}
 
 	// swap the background subtraction images
@@ -1527,10 +1524,23 @@ bool ufmfWriter::updateBGModel(unsigned __int8 * frame, double timestamp, unsign
 	tmpSwap = BGUpperBound0;
 	BGUpperBound0 = BGUpperBound1;
 	BGUpperBound1 = tmpSwap;
+	if(stats){
+		float * tmpSwapFloat;
+		tmpSwapFloat = BGCenter0;
+		BGCenter0 = BGCenter1;
+		BGCenter1 = tmpSwapFloat;
+		double tmpSwapDouble = keyframeTimestamp0;
+		keyframeTimestamp0 = keyframeTimestamp1;
+		keyframeTimestamp1 = tmpSwapDouble;
+		unsigned __int64 tmpSwap64;
+		tmpSwap64 = minFrameBGModel0;
+		minFrameBGModel0 = minFrameBGModel1;
+		minFrameBGModel1 = tmpSwap64;
+	}
 
 	// we start using model 1 at this frame
 	minFrameBGModel1 = frameNumber;
-	keyframeTimestamp = timestamp;
+	keyframeTimestamp1 = timestamp;
 
 	Unlock();
 
@@ -1592,115 +1602,6 @@ DWORD WINAPI ufmfWriter::compressionThread(void* param){
 	return 0;
 }
 
-// create compression thread
-DWORD WINAPI ufmfWriter::compressionThreadManager(void* param){
-	ufmfWriter* writer = reinterpret_cast<ufmfWriter*>(param);
-	//MSG msg;
-	//bool didwrite;
-
-	SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_TIME_CRITICAL);
-	
-	// Signal that we are ready to begin writing
-	ReleaseSemaphore(writer->compressionThreadManagerReadySignal, 1, NULL);  
-
-	// Continuously capture and write frames to disk
-	while(writer->ProcessNextCompressFrame())
-		;
-
-	//writer->Lock();
-	//writer->finishWrite();
-	//writer->Unlock();
-	
-	return 0;
-}
-
-// compress next available uncompressed frame
-bool ufmfWriter::ProcessNextCompressFrame() {
-
-	ULARGE_INTEGER stats_t0;
-	if(stats){
-		stats_t0 = ufmfWriterStats::getTime();
-	}
-
-	// wait for an uncompressed frame
-	int bufferIndex, threadIndex;
-	DWORD waittime;
-	bool res;
-
-	Lock();
-	// wait for any uncompressed frame to be empty
-	if(isWriting){
-		waittime = MAXWAITTIMEMS;
-	}
-	else{
-		if(nUncompressedFramesBuffered == 0){
-			return false;
-		}
-		waittime = 100;
-	}
-	Unlock();
-
-	bufferIndex = (int)WaitForMultipleObjects((DWORD)nBuffers,uncompressedBufferFilledSemaphores,false,waittime) - (int)WAIT_OBJECT_0;
-	if(bufferIndex < 0 || bufferIndex >= (int)nBuffers){
-		if(isWriting) logger->log(UFMF_ERROR,"Error waiting for an uncompressed frame to compress: %x\n",bufferIndex+WAIT_OBJECT_0);
-		return false;
-	}
-
-	if(stats){
-		stats_t0 = stats->updateTimings(UTT_WAIT_FOR_UNCOMPRESSED_FRAME_MANAGER,stats_t0);
-	}
-
-	logger->log(UFMF_DEBUG_7,"starting compression frame manager on buffer %d, frame %u\n",bufferIndex,uncompressedBufferFrameNumbers[bufferIndex]);
-
-	Lock();
-	// Check if we were signalled to stop compressing
-	if(nUncompressedFramesBuffered == 0) {
-		if(isWriting){
-			Unlock();
-			logger->log(UFMF_ERROR, "Something went wrong... Got signal to compress frame but no frames buffered and compress flag is still on\n");
-		}
-		else{
-			Unlock();
-		}
-		return false;
-	}
-	Unlock();
-
-	// find an available compression thread
-	logger->log(UFMF_DEBUG_7,"waiting for a compression thread to be ready\n");
-	threadIndex = (int)WaitForMultipleObjects((DWORD)nThreads,compressionThreadReadySignals,false,MAXWAITTIMEMS)- (int)WAIT_OBJECT_0;
-	logger->log(UFMF_DEBUG_7,"Found threadIndex = %d\n",threadIndex);
-	if(threadIndex < 0 || threadIndex >= (int)nThreads){
-		if(threadIndex+WAIT_OBJECT_0 == WAIT_TIMEOUT){
-			logger->log(UFMF_ERROR,"Error waiting for an compression thread to be ready: TIMEOUT\n");
-		}
-		else{
-			logger->log(UFMF_ERROR,"Error waiting for an compression thread to be ready: %x\n",threadIndex+WAIT_OBJECT_0);
-		}
-		return false;
-	}
-
-	logger->log(UFMF_DEBUG_7,"sending buffer %d, frame %u to compression thread %d\n",bufferIndex,uncompressedBufferFrameNumbers[bufferIndex],threadIndex);
-
-
-	// signal this thread
-	Lock();
-	threadBufferIndex[threadIndex] = bufferIndex;
-	Unlock();
-	ReleaseSemaphore(compressionThreadStartSignals[threadIndex],1,NULL);
-
-	Lock();
-	res = isWriting || nUncompressedFramesBuffered > 0;
-	Unlock();
-
-	if(stats){
-		stats_t0 = stats->updateTimings(UTT_WAIT_FOR_COMPRESS_THREAD,stats_t0);
-	}
-
-	return(res);
-
-}
-
 // compress frame queued for this thread
 bool ufmfWriter::ProcessNextCompressFrame(int threadIndex) {
 	
@@ -1709,7 +1610,6 @@ bool ufmfWriter::ProcessNextCompressFrame(int threadIndex) {
 		stats_t0 = ufmfWriterStats::getTime();
 	}
 
-	int bufferIndex;
 	unsigned __int64 frameNumber;
 	bool res;
 
@@ -1720,9 +1620,7 @@ bool ufmfWriter::ProcessNextCompressFrame(int threadIndex) {
 		stats_t0 = stats->updateTimings(UTT_WAIT_FOR_UNCOMPRESSED_FRAME,stats_t0);
 	}
 
-	bufferIndex = threadBufferIndex[threadIndex];
-	logger->log(UFMF_DEBUG_7,"starting compression on buffer %d, frame %u\n",bufferIndex,uncompressedBufferFrameNumbers[bufferIndex]);
-
+	logger->log(UFMF_DEBUG_7,"starting compression thread %d on frame %u\n",threadIndex,threadFrameNumbers[threadIndex]);
 
 	// Check if we were signalled to stop compressing
 	Lock();
@@ -1743,34 +1641,37 @@ bool ufmfWriter::ProcessNextCompressFrame(int threadIndex) {
 	// compress this frame
 	unsigned __int8 * BGLowerBoundCurr;
 	unsigned __int8 * BGUpperBoundCurr;
-	frameNumber = uncompressedBufferFrameNumbers[bufferIndex];
+	//unsigned __int8 * BGCenterCurr;
+	frameNumber = threadFrameNumbers[threadIndex];
 	Lock();
-	if(frameNumber < minFrameBGModel1){
+	if(frameNumber < minFrameBGModel0){
+		logger->log(UFMF_ERROR,"Error: frameNumber %llu < minFrameBGModel0 %llu\n",frameNumber,minFrameBGModel0);
+		return false;
+	}
+	else if(frameNumber < minFrameBGModel1){
 		logger->log(UFMF_DEBUG_7,"using bg model 0 to compress frame %d\n",frameNumber);
 		BGLowerBoundCurr = BGLowerBound0;
 		BGUpperBoundCurr = BGUpperBound0;
+		//BGCenterCurr = BGCenter0;
 	}
 	else{
 		logger->log(UFMF_DEBUG_7,"using bg model 1 to compress frame %d\n",frameNumber);
 		BGLowerBoundCurr = BGLowerBound1;
 		BGUpperBoundCurr = BGUpperBound1;
+		//BGCenterCurr = BGCenter1;
 	}
 	Unlock();
 
-	compressedFrames[bufferIndex]->setData(uncompressedFrames[bufferIndex],uncompressedBufferTimestamps[bufferIndex],
+	compressedFrames[threadIndex]->setData(uncompressedFrames[threadIndex],threadTimestamps[threadIndex],
 		frameNumber,BGLowerBoundCurr,BGUpperBoundCurr);
 
 	Lock(); // lock for nCompressedFramesBuffered
 	nCompressedFramesBuffered++;
+	logger->log(UFMF_DEBUG_7,"set nCompressedFramesBuffered to %d after compressing frame %llu\n",nCompressedFramesBuffered,frameNumber);
 	Unlock();
 
-	// signal that the compressed buffer is filled
-	ReleaseSemaphore(compressedBufferFilledSemaphores[bufferIndex],1,NULL);
-	// signal that the uncompressed buffer is free
-	ReleaseSemaphore(uncompressedBufferEmptySemaphores[bufferIndex],1,NULL);
-
-	// signal that this thread is ready
-	ReleaseSemaphore(compressionThreadReadySignals[threadIndex],1,NULL);
+	// signal that the compression thread is finished
+	ReleaseSemaphore(compressionThreadDoneSignals[threadIndex],1,NULL);
 
 	Lock();
 	res = isWriting || nUncompressedFramesBuffered > 0;
@@ -1790,9 +1691,10 @@ bool ufmfWriter::ProcessNextWriteFrame(){
 		stats_t0 = ufmfWriterStats::getTime();
 	}
 
-	int bufferIndex;
+	int threadIndex;
 	unsigned __int64 frameNumber;
 	int i;
+	int nReadyToWrite = 0;
 	time_t startTime = time(NULL);
 
 	Lock();
@@ -1804,55 +1706,40 @@ bool ufmfWriter::ProcessNextWriteFrame(){
 
 	while(true){
 
-		// wait for any compressed frame to be filled
-		bufferIndex = (int)WaitForMultipleObjects((DWORD)nBuffers,compressedBufferFilledSemaphores,false,MAXWAITTIMEMS) - (int)WAIT_OBJECT_0;
+		if(nReadyToWrite >= nThreads){
+			logger->log(UFMF_ERROR,"Found too many frames that need to be written! Something is wrong!\n");
+			return false;
+		}
 
-		if(bufferIndex > nBuffers || bufferIndex < 0){
-			logger->log(UFMF_ERROR,"Error waiting for compressedBufferFilledSemaphore in write thread\n");
+		// wait for any compressed frame to be filled
+		threadIndex = (int)WaitForMultipleObjects((DWORD)nThreads,compressionThreadDoneSignals,false,MAXWAITTIMEMS) - (int)WAIT_OBJECT_0;
+
+		if(threadIndex > nThreads || threadIndex < 0){
+			logger->log(UFMF_ERROR,"Error waiting for compressionThreadDoneSignals in write thread\n");
 			return false;
 		}
 		// Check if we were signalled to stop writing
 		Lock(); // lock because we are accessing isWriting and nCompressedFramesBuffered
 		if(nCompressedFramesBuffered == 0) {
 			if(isWriting) {
-				Unlock();
-				logger->log(UFMF_ERROR, "Something went wrong... Got signal to write frame but no compressed frames buffered and write flag is still on\n");
+				logger->log(UFMF_ERROR, "Something went wrong... Got signal to write frame for thread %d containing frame %llu but no compressed frames buffered and write flag is still on\n",threadIndex,compressedFrames[threadIndex]->frameNumber);
 			}
-			else{
-				Unlock(); 
-			}
+			Unlock(); 
 			return false;
 		}
 		Unlock();
 
-		logger->log(UFMF_DEBUG_7,"got frame %u when waiting to write frame %u\n",compressedFrames[bufferIndex]->frameNumber,frameNumber);
+		logger->log(UFMF_DEBUG_7,"got frame %u when waiting to write frame %u\n",compressedFrames[threadIndex]->frameNumber,frameNumber);
+
+		readyToWrite[nReadyToWrite++] = threadIndex;
 
 		// is this the next frame to write?
-		if(compressedFrames[bufferIndex]->frameNumber == frameNumber){
-			Unlock();
+		if(compressedFrames[threadIndex]->frameNumber == frameNumber){
 			break;
 		}
-		Unlock();
-
-		// wrong frame, restore semaphore
-		ReleaseSemaphore(compressedBufferFilledSemaphores,1,NULL);
-
-		// see if the compressed frame is available too
-		Lock();
-		bufferIndex = -1;
-		for(int i = 0; i < (int)nBuffers; i++){
-			if(compressedFrames[i]->frameNumber == frameNumber){
-				bufferIndex = i;
-				logger->log(UFMF_DEBUG_7,"also found frame %u after getting the signal from %u\n",frameNumber,compressedFrames[bufferIndex]->frameNumber);
-				break;
-			}
-		}
-		Unlock();
-
-		// did we find it?
-		if(bufferIndex >= 0){
-			ReleaseSemaphore(compressedBufferFilledSemaphores[bufferIndex],-1,NULL);
-			break;
+		if(compressedFrames[threadIndex]->frameNumber < frameNumber){
+			logger->log(UFMF_ERROR,"Got frame %llu when waiting for frame %llu -- we should have already written this frame.\n",compressedFrames[threadIndex]->frameNumber,frameNumber);
+			return false;
 		}
 
 		if(difftime(time(NULL),startTime) > MAXWAITTIMEMS/1000.0){
@@ -1865,40 +1752,73 @@ bool ufmfWriter::ProcessNextWriteFrame(){
 		stats->updateTimings(UTT_WAIT_FOR_COMPRESSED_FRAME,stats_t0);
 	}
 
-	// okay, we have a compressed frame
-	Lock(); // lock to access nCompressedFramesBuffered
-	nCompressedFramesBuffered--;
-	Unlock();
+	// replace the semaphores for future frames
+	for(i = 0; i < nReadyToWrite-1; i++){
+		logger->log(UFMF_DEBUG_7,"Putting buffer %d, frame %llu back in the queue to be written when waiting for frame %llu.\n",readyToWrite[i],compressedFrames[readyToWrite[i]]->frameNumber,frameNumber);
+		ReleaseSemaphore(compressionThreadDoneSignals[readyToWrite[i]],1,NULL);
+	}
+
+	// update timings
 
 	// write background model if nec
 	Lock();
-	if(frameNumber == minFrameBGModel1){
-		Unlock();
-		writeBGKeyFrame();
+	bool isBGModel1 = frameNumber >= minFrameBGModel1;
+	bool writeKeyFrame1 = frameNumber == minFrameBGModel1;
+	bool writeKeyFrame0 = frameNumber == minFrameBGModel0;
+	double keyframeTimestamp0Copy = keyframeTimestamp0;
+	double keyframeTimestamp1Copy = keyframeTimestamp1;
+	Unlock();
+	if(writeKeyFrame0){
+		writeBGKeyFrame(BGCenter0,keyframeTimestamp0Copy);
+		logger->log(UFMF_DEBUG_3,"Wrote key frame 0 for frame %llu, releasing semaphore\n",frameNumber);
+		//ReleaseSemaphore(keyFrameWritten,1,NULL);
 	}
-	else{
-		Unlock();
+	if(writeKeyFrame1){
+		writeBGKeyFrame(BGCenter1,keyframeTimestamp1Copy);
+		logger->log(UFMF_DEBUG_3,"Wrote key frame 1 for frame %llu, releasing semaphore\n",frameNumber);
+		//ReleaseSemaphore(keyFrameWritten,1,NULL);
 	}
 
-	if(stats){
-		stats_t0 = ufmfWriterStats::getTime();
-	}
+
 	// write the compressed frame
-	if(!writeFrame(compressedFrames[bufferIndex])){
-		logger->log(UFMF_ERROR,"Error writing frame %u from buffer %d\n",frameNumber,bufferIndex);
+	threadIndex = readyToWrite[nReadyToWrite-1];
+
+	__int64 frameSizeBytes = writeFrame(compressedFrames[threadIndex]);
+	if(frameSizeBytes <= 0){
+		logger->log(UFMF_ERROR,"Error writing frame %u from thread %d\n",frameNumber,threadIndex);
 		return false;
 	}
 
-	// signal that the compressed buffer is free
-	ReleaseSemaphore(compressedBufferEmptySemaphores[bufferIndex],1,NULL);
-
 	Lock(); // lock to access isWriting and nCompressedFramesBuffered
+	nCompressedFramesBuffered--;
+	unsigned __int64 nFramesDroppedExternalCopy = nFramesDroppedExternal;
+	unsigned __int64 nFramesBufferedExternalCopy = nFramesBufferedExternal;
+	logger->log(UFMF_DEBUG_7,"set nCompressedFramesBuffered to %d after writing frame %llu\n",nCompressedFramesBuffered,frameNumber);
 	bool res = isWriting || nCompressedFramesBuffered > 0;
 	Unlock();
 
 	if(stats){
-		stats->updateTimings(UTT_WRITE_FRAME,stats_t0);
+		stats_t0 = ufmfWriterStats::getTime();
+		float * BGCenterCurr;
+		if(isBGModel1)
+			BGCenterCurr = BGCenter1;
+		else
+			BGCenterCurr = BGCenter0;
+		stats->update(index, index_timestamp, frameSizeBytes, compressedFrames[threadIndex]->isCompressed, 
+			compressedFrames[threadIndex]->numFore, compressedFrames[threadIndex]->numPxWritten, 
+			compressedFrames[threadIndex]->ncc, nFramesBufferedExternal, nFramesDroppedExternal, 
+			compressedFrames[threadIndex]->nWrites, nPixels, uncompressedFrames[threadIndex], 
+			BGCenterCurr, UFMF_DEBUG_3);
+		stats->updateTimings(UTT_COMPUTE_STATS,stats_t0);
 	}
+
+	// signal that we've written the key frame
+	//if(writeKeyFrame)
+	//	ReleaseSemaphore(keyFrameWritten,1,NULL);
+
+	// signal that the compression thread can be used again
+	ReleaseSemaphore(compressionThreadReadySignals[threadIndex],1,NULL);
+	logger->log(UFMF_DEBUG_7,"Released compressionThreadReadySignals[%d]\n",threadIndex);
 
 	return(res);
 
@@ -1917,39 +1837,7 @@ bool ufmfWriter::stopThreads(bool waitForFinish){
 		isWriting = false;
 		Unlock();
 
-		logger->log(UFMF_DEBUG_7,"stopping compression thread manager\n");
-		if(_compressionThreadManager){
-			if(!waitForFinish){
-				Lock();
-				nUncompressedFramesBuffered = 0;
-				Unlock();
-				for(int j = 0; j < (int)nBuffers; j++){
-					ReleaseSemaphore(uncompressedBufferFilledSemaphores[j], 1, NULL);
-				}
-			}
-			else{
-				Lock();
-				if(nUncompressedFramesBuffered == 0){
-					Unlock();
-					for(int j = 0; j < (int)nBuffers; j++){
-						ReleaseSemaphore(uncompressedBufferFilledSemaphores[j], 1, NULL);
-					}
-				}
-				else{
-					Unlock();
-				}
-			}
-					
-			if(WaitForSingleObject(_compressionThreadManager,MAXWAITTIMEMS) != WAIT_OBJECT_0){
-				logger->log(UFMF_ERROR,"Error shutting down compression thread manager\n");
-			}
-			else{
-				logger->log(UFMF_DEBUG_3,"Successfully shut down compression thread manager\n");
-			}
-			CloseHandle(_compressionThreadManager);
-			_compressionThreadManager = NULL;
-		}
-
+		// stop each compression thread
 		for(int i = 0; i < (int)nThreads; i++){
 			logger->log(UFMF_DEBUG_7,"stopping compression thread %d\n",i);
 			ReleaseSemaphore(compressionThreadStartSignals[i],1,NULL);
@@ -1992,8 +1880,8 @@ bool ufmfWriter::stopThreads(bool waitForFinish){
 				// increment semaphores so that the compression threads don't block forever. 
 				// since nCompressedFramesBuffered == 0 and isWriting == false, we won't try to 
 				// compress a frame
-				for(int j = 0; j < (int)nBuffers; j++){
-					ReleaseSemaphore(compressedBufferFilledSemaphores[j], 1, NULL);
+				for(int j = 0; j < (int)nThreads; j++){
+					ReleaseSemaphore(compressionThreadDoneSignals[j], 1, NULL);
 				}
 				if(WaitForSingleObject(_writeThread, MAXWAITTIMEMS) != WAIT_OBJECT_0){
 					logger->log(UFMF_ERROR,"Error shutting down write thread\n");
@@ -2003,8 +1891,8 @@ bool ufmfWriter::stopThreads(bool waitForFinish){
 				Lock();
 				if(nCompressedFramesBuffered == 0){
 					Unlock();
-					for(int j = 0; j < (int)nBuffers; j++){
-						ReleaseSemaphore(compressedBufferFilledSemaphores[j], 1, NULL);
+					for(int j = 0; j < (int)nThreads; j++){
+						ReleaseSemaphore(compressionThreadDoneSignals[j], 1, NULL);
 					}
 				}
 				else{
@@ -2041,7 +1929,7 @@ void ufmfWriter::deallocateBuffers(){
 
 	int i;
 	if(uncompressedFrames != NULL){
-		for(i = 0; i < (int)nBuffers; i++){
+		for(i = 0; i < (int)nThreads; i++){
 			if(uncompressedFrames[i] != NULL){
 				delete [] uncompressedFrames[i];
 				uncompressedFrames[i] = NULL;
@@ -2053,7 +1941,7 @@ void ufmfWriter::deallocateBuffers(){
 	nUncompressedFramesBuffered = 0;
 
 	if(compressedFrames != NULL){
-		for(i = 0; i < (int)nBuffers; i++){
+		for(i = 0; i < (int)nThreads; i++){
 			if(compressedFrames[i] != NULL){
 				delete compressedFrames[i];
 				compressedFrames[i] = NULL;
@@ -2064,21 +1952,28 @@ void ufmfWriter::deallocateBuffers(){
 	}
 	nCompressedFramesBuffered = 0;
 
-	if(uncompressedBufferTimestamps != NULL){
-		delete [] uncompressedBufferTimestamps;
-		uncompressedBufferTimestamps = NULL;
+	if(threadTimestamps != NULL){
+		delete [] threadTimestamps;
+		threadTimestamps = NULL;
 	}
 
-	if(uncompressedBufferFrameNumbers != NULL){
-		delete [] uncompressedBufferFrameNumbers;
-		uncompressedBufferFrameNumbers = NULL;
+	if(threadFrameNumbers != NULL){
+		delete [] threadFrameNumbers;
+		threadFrameNumbers = NULL;
+	}
+
+	if(readyToWrite != NULL){
+		delete [] readyToWrite;
+		readyToWrite = NULL;
 	}
 }
 
 void ufmfWriter::deallocateBGModel(){
 
-	delete bg;
-	bg = NULL;
+	if(bg != NULL){
+		delete bg;
+		bg = NULL;
+	}
 	if(BGLowerBound0 != NULL){
 		delete [] BGLowerBound0;
 		BGLowerBound0 = NULL;
@@ -2138,58 +2033,20 @@ void ufmfWriter::deallocateThreadStuff(){
 		 compressionThreadStartSignals = NULL;
 	 }
 
+	 if(compressionThreadDoneSignals != NULL){
+		 for(i = 0; i < (int)nThreads; i++){
+			 if(compressionThreadDoneSignals[i]){
+				 CloseHandle(compressionThreadDoneSignals[i]);
+				 compressionThreadDoneSignals[i] = NULL;
+			 }
+		 }
+		 delete [] compressionThreadDoneSignals;
+		 compressionThreadDoneSignals = NULL;
+	 }
+
 	 if(lock){
 		 CloseHandle(lock);
 		 lock = NULL;
-	 }
-
-	 if(uncompressedBufferEmptySemaphores != NULL){
-		 for(i = 0; i < (int)nThreads; i++){
-			 if(uncompressedBufferEmptySemaphores[i]){
-				 CloseHandle(uncompressedBufferEmptySemaphores[i]);
-				 uncompressedBufferEmptySemaphores[i] = NULL;
-			 }
-		 }
-		 delete [] uncompressedBufferEmptySemaphores;
-		 uncompressedBufferEmptySemaphores = NULL;
-	 }
-
-	 if(uncompressedBufferFilledSemaphores != NULL){
-		 for(i = 0; i < (int)nThreads; i++){
-			 if(uncompressedBufferFilledSemaphores[i]){
-				 CloseHandle(uncompressedBufferFilledSemaphores[i]);
-				 uncompressedBufferFilledSemaphores[i] = NULL;
-			 }
-		 }
-		 delete [] uncompressedBufferFilledSemaphores;
-		 uncompressedBufferFilledSemaphores = NULL;
-	 }
-
-	 if(compressedBufferEmptySemaphores != NULL){
-		 for(i = 0; i < (int)nThreads; i++){
-			 if(compressedBufferEmptySemaphores[i]){
-				 CloseHandle(compressedBufferEmptySemaphores[i]);
-				 compressedBufferEmptySemaphores[i] = NULL;
-			 }
-		 }
-		 delete [] compressedBufferEmptySemaphores;
-		 compressedBufferEmptySemaphores = NULL;
-	 }
-
-	 if(compressedBufferFilledSemaphores != NULL){
-		 for(i = 0; i < (int)nThreads; i++){
-			 if(compressedBufferFilledSemaphores[i]){
-				 CloseHandle(compressedBufferFilledSemaphores[i]);
-				 compressedBufferFilledSemaphores[i] = NULL;
-			 }
-		 }
-		 delete [] compressedBufferFilledSemaphores;
-		 compressedBufferFilledSemaphores = NULL;
-	 }
-
-	 if(threadBufferIndex != NULL){
-		 delete [] threadBufferIndex;
-		 threadBufferIndex = NULL;
 	 }
 
 	 if(keyFrameWritten != NULL){
@@ -2206,7 +2063,7 @@ void ufmfWriter::deallocateThreadStuff(){
 
 // ************** helper functions *************************
 
-char* strtrim(char *aString)
+char* ufmfWriter::strtrim(char *aString)
 {
     int i;
     int lLength = strlen(aString);

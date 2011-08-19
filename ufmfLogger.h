@@ -88,7 +88,7 @@ public:
 				va_start(argp, fmt); 
 				vfprintf(fout, fmt, argp); 
 				va_end(argp); 
-				if(flush) fflush(fout); 
+				if(flush || l<=UFMF_ERROR) fflush(fout); 
 			}
 			if(!keepOpen){
 				fclose(fout);

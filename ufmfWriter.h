@@ -7,7 +7,7 @@
 #include <vector>
 #include <math.h>
 #include <time.h>
-#define MAXWAITTIMEMS 20000
+#define MAXWAITTIMEMS 10000
 
 class BackgroundModel {
 
@@ -60,6 +60,9 @@ private:
 	unsigned short wHeight; //Image Height
 	int nPixels;
 	bool * isFore; // whether each pixel is foreground or not
+	int numFore;
+	int numPxWritten;
+	bool isCompressed;
 	//bool * debugWasFore; // TODO: remove after debugging
 	unsigned __int16 * writeRowBuffer; // ymins
 	unsigned __int16 * writeColBuffer; // xmins
@@ -92,7 +95,7 @@ public:
 	void init();
 
 	// common code for parameter-filled constructors
-	void init(const char * fileName, unsigned __int32 pWidth, unsigned __int32 pHeight, unsigned __int32 nBuffers = 10,
+	void init(const char * fileName, unsigned __int32 pWidth, unsigned __int32 pHeight, 
 		int MaxBGNFrames = 100, double BGUpdatePeriod = 1.0, double BGKeyFramePeriod = 100, unsigned __int32 boxLength = 30,
 		double backSubThresh = 10.0, unsigned __int32 nFramesInit = 100, double* BGKeyFramePeriodInit = NULL, int BGKeyFramePeriodInitLength = 0, 
 		double maxFracFgCompress = 1.0, const char *statFileName=NULL, bool printStats=true, int statStreamPrintFreq=1, bool statPrintFrameErrors=true, 
@@ -112,7 +115,6 @@ public:
 	// pWidth: width of frame
 	// pHeight: height of frame
 	// [acquisition parameters:]
-	// nBuffers: number of frames to buffer between acquiring and writing
 	// [compression parameters:]
 	// MaxBGNFrames: approximate number of frames used in background computation
 	// BGUpdatePeriod: seconds between updates to the background model
@@ -127,7 +129,7 @@ public:
 	// statPrintFrameErrors: whether to compute and print statistics of compression error. Currently, box-averaged and per-pixel errors are either both
 	// computed or both not computed. 
 	// statPrintTimings: whether to print information about the time each part of the computation takes. 
-	ufmfWriter(const char * fileName, unsigned __int32 pWidth, unsigned __int32 pHeight, FILE* logFID, unsigned __int32 nBuffers = 10,
+	ufmfWriter(const char * fileName, unsigned __int32 pWidth, unsigned __int32 pHeight, FILE* logFID, 
 		int MaxBGNFrames = 100, double BGUpdatePeriod = 1.0, double BGKeyFramePeriod = 100, unsigned __int32 boxLength = 30,
 		double backSubThresh = 10.0, unsigned __int32 nFramesInit = 100, double* BGKeyFramePeriodInit = NULL, int BGKeyFramePeriodInitLength = 0, 
 		double maxFracFgCompress = 1.0, const char *statFileName=NULL, bool printStats=true, int statStreamPrintFreq=1, bool statPrintFrameErrors=true, 
@@ -154,7 +156,7 @@ public:
 	unsigned __int64 stopWrite();
 
 	// add a frame to be processed
-	bool addFrame(unsigned char * frame, double timestamp);
+	bool addFrame(unsigned char * frame, double timestamp, unsigned __int64 nFramesDroppedExternal=0, unsigned __int64 nFramesBufferedExternal=0);
 
 	// set video file name, width, height
 	// todo: resize buffers if already allocated
@@ -176,7 +178,7 @@ private:
 	// *** writing tools ***
 
 	// write a frame
-	bool writeFrame(CompressedFrame * im);
+	__int64 writeFrame(CompressedFrame * im);
 
 	// write the video header
 	bool writeHeader();
@@ -185,7 +187,7 @@ private:
 	bool finishWriting();
 
 	// write a background keyframe to file
-	bool writeBGKeyFrame();
+	bool writeBGKeyFrame(float* BGCenter,double keyframeTimestamp);
 
 	// *** compression tools ***
 
@@ -203,13 +205,7 @@ private:
 	// start compression thread
 	static DWORD WINAPI compressionThread(void* param);  //compression function declaration
 
-	// start compression thread manager
-	static DWORD WINAPI compressionThreadManager(void* param);  //compression function declaration
-
-	// compress next available frame
-	bool ProcessNextCompressFrame();
-
-	// compress frame available in buffer threadBufferIndex[threadIndex] with thread threadIndex 
+	// compress frame with thread threadIndex 
 	bool ProcessNextCompressFrame(int threadIndex);
 
 	// write next frame
@@ -231,6 +227,9 @@ private:
 	// deallocate and release all thread stuff
 	void deallocateThreadStuff();
 
+	// helper function
+	static char * strtrim(char *aString);
+
 	// ***** state *****
 
 	// *** output ufmf state ***
@@ -248,6 +247,8 @@ private:
 	unsigned __int64 nGrabbed; // Number of frames for which addframe  has been called
 	unsigned __int64 nWritten; //Track number of frames written to disk
 	unsigned __int64 nBGKeyFramesWritten; // Number of background images written
+	unsigned __int64 nFramesDroppedExternal; // Number of frames dropped by the external process
+	unsigned __int64 nFramesBufferedExternal; // Number of frames buffered by the external process
 	bool isWriting; // Whether we are still compressing, still writing
 
 	// *** threading/buffering state ***
@@ -255,34 +256,28 @@ private:
 	// buffer for grabbed, uncompressed frames
 	unsigned char ** uncompressedFrames;
 	// timestamps of buffered frames
-	double * uncompressedBufferTimestamps;
+	double * threadTimestamps;
 	// buffer for compressed frames
 	CompressedFrame ** compressedFrames;
-	// number of uncompressed frames in the buffer
+	// buffers grabbed while waiting for the next frame to write
+	int * readyToWrite;
+	// number of uncompressed frames buffered
 	int nUncompressedFramesBuffered;
-	// number of compressed frames in the buffer
+	// number of compressed frames buffered
 	int nCompressedFramesBuffered;
-	unsigned __int64 * uncompressedBufferFrameNumbers; // which grabbed frame is stored in each buffer -- used for writing frames in order
+	unsigned __int64 * threadFrameNumbers; // which grabbed frame is processed by each thread -- used for writing frames in order
 
 	HANDLE _writeThread; // write ThreadVariable
 	DWORD _writeThreadID; //write thread ID returned by Windows
 	HANDLE* _compressionThreads; // compression ThreadVariables
-	HANDLE _compressionThreadManager; // compression manager ThreadVariables
 	DWORD* _compressionThreadIDs; //compression thread IDs returned by Windows
-	DWORD _compressionThreadManagerID; // compression thread manager ID returned by windows
 	int threadCount; // current number of compression threads
 	HANDLE writeThreadReadySignal; // signal that write thread is set up
 	HANDLE * compressionThreadReadySignals; // signals that compression threads are set up and ready to process a frame
-	HANDLE compressionThreadManagerReadySignal; // signal that the compression manager thread is set up
 	HANDLE * compressionThreadStartSignals; // signals to compression threads to start processing a frame
+	HANDLE* compressionThreadDoneSignals; // signal that the compression frame has finished processing a frame and the frame is ready to be written
 	HANDLE lock; // semaphore for keeping different threads from accessing the same global variables at the same time
-	// note that these two semaphores can both be 0, indicating that the uncompressed buffer is either being filled or emptied
-	HANDLE* uncompressedBufferEmptySemaphores; // signal that the uncompressed buffer is empty
-	HANDLE* uncompressedBufferFilledSemaphores; 
-	// note that these two semaphores can both be 0, indicating that the compressed buffer is either being filled or emptied
-	HANDLE* compressedBufferEmptySemaphores; // signal that the compressed buffer is empty
-	HANDLE* compressedBufferFilledSemaphores; // signal that the compressed buffer is filled
-	int * threadBufferIndex; // which buffer each thread works on
+
 	HANDLE keyFrameWritten; // whether the last computed key frame has been written
 
 	// *** background subtraction state ***
@@ -295,10 +290,14 @@ private:
 	// lower and upper bounds available for thresholding
 	unsigned __int8 * BGLowerBound0; // per-pixel lower bound on background
 	unsigned __int8 * BGUpperBound0; // per-pixel upper bound on background
+	float * BGCenter0; 
 	unsigned __int8 * BGLowerBound1; // per-pixel lower bound on background
 	unsigned __int8 * BGUpperBound1; // per-pixel upper bound on background
+	float * BGCenter1; 
+	unsigned __int64 minFrameBGModel0; // first frame that can be used with background model 0
 	unsigned __int64 minFrameBGModel1; // first frame that can be used with background model 1
-	double keyframeTimestamp; // timestamp for this key frame
+	double keyframeTimestamp0; // timestamp for key frame in buffer 0
+	double keyframeTimestamp1; // timestamp for key frame in buffer 1
 	//unsigned __int8 ** BGCounts; // counts per bin: note the limited resolution
 	//float * BGCenter; // current background model
 	//unsigned __int8 * BGLowerBound; // per-pixel lower bound on background
@@ -316,7 +315,6 @@ private:
 	// *** threading parameters ***
 
 	unsigned __int32 nThreads; // number of compression threads
-	unsigned __int32 nBuffers; // number of frames buffered
 
 	// *** video parameters ***
 
@@ -361,6 +359,10 @@ private:
 	bool statPrintFrameErrors;
 	bool statPrintTimings; 
 	int statComputeFrameErrorFreq;
+
+	// *** logging parameters ***
+	ufmfDebugLevel UFMFDEBUGLEVEL;
+
 
 };
 

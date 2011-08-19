@@ -47,8 +47,10 @@ bool previewVideo::Unlock(){
 
 bool previewVideo::setFrame(IplImage * frame, unsigned __int64 frameNumber){
 
+	Lock();
 	this->frame = frame;
 	this->frameNumber = frameNumber;
+	Unlock();
 	return isRunning;
 }
 
@@ -92,6 +94,7 @@ bool previewVideo::ProcessNextPreview(){
 	lastFrameNumber = frameNumber;
 	Unlock();
 
+	//if(frameNumber % 100 == 0) fprintf(stderr,"Showing frame %llu\n",frameNumber);
 	cvShowImage( "Preview", frameCopy );
 	char c = cvWaitKey(1);
 	if(c == 27){

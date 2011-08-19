@@ -88,10 +88,13 @@
   <ItemGroup>
     <ClCompile Include="fmfWriter.cpp" />
     <ClCompile Include="gige_record_x64.cpp" />
+    <ClCompile Include="previewVideo.cpp" />
     <ClCompile Include="ufmfWriter.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="fmfWriter.h" />
+    <ClInclude Include="previewVideo.h" />
+    <ClInclude Include="ufmfLogger.h" />
     <ClInclude Include="ufmfWriter.h" />
     <ClInclude Include="ufmfWriterStats.h" />
   </ItemGroup>

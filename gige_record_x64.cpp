@@ -3,6 +3,8 @@
 #include <PvApi.h>
 #include <stdio.h>
 #include "fmfWriter.h"
+#include "ufmfWriter.h"
+#include "previewVideo.h"
 
 #define _STDCALL __stdcall
 
@@ -32,6 +34,13 @@ public:
 	char pixelFormat[CHARARRAYSIZE];
 	int bitDepth;
 	int nChannels;
+	// timestamp conversion
+	unsigned long timestampFrequency;
+
+	// how often, if ever, to update the preview window
+	int previewUpdatePeriod;
+	HANDLE previewLock;
+	previewVideo * preview;
 
 	// record time
 	double recordTimeSeconds;
@@ -50,18 +59,18 @@ public:
 	// buffer indexes from firstFrameAvailable through firstFrameQueued-1 
 	// are unused
 	// buffer indexes processableStart through processableEnd-1 are storing data that needs to be processed
-	unsigned long processableStart;
-	unsigned long nFramesProcessable;
+	unsigned __int64 processableStart;
+	unsigned __int64 nFramesProcessable;
 	// buffer indexes queueableStart through queueableEnd-1 can be requeued
-	unsigned long queueableStart;
-	unsigned long nFramesQueueable;
-	unsigned long nFramesQueued;
+	unsigned __int64 queueableStart;
+	unsigned __int64 nFramesQueueable;
+	unsigned __int64 nFramesQueued;
 	// counts
-	unsigned long nFramesGrabbed;
-	unsigned long nFramesProcessed;
-	unsigned long nFramesDropped;
+	unsigned __int64 nFramesGrabbed;
+	unsigned __int64 nFramesProcessed;
+	unsigned __int64 nFramesDropped;
 	// number of frames to buffer at max
-	unsigned long nFramesBuffer;
+	unsigned __int64 nFramesBuffer;
 
 	// opencv image buffer
 	IplImage** imageBuffer;
@@ -82,6 +91,7 @@ public:
 	bool footerWritten;
 	CvVideoWriter *AVIwriter;
 	fmfWriter* FMFwriter;
+	ufmfWriter* UFMFwriter;
 	VideoFormatType videoFormat;
 
 	// start time
@@ -98,6 +108,7 @@ public:
 	// params file stuff
 	char cameraParamFileName[CHARARRAYSIZE];
 	char experimentParamFileName[CHARARRAYSIZE];
+	char videoParamFileName[CHARARRAYSIZE];
 
 	// constructor
 	void initGigeRecord();
@@ -188,8 +199,14 @@ void GigeRecord::initGigeRecord(){
 	cameraUID = 0;
 	strcpy(cameraName,"");
 
+	// preview
+	previewUpdatePeriod = 1;
+	previewLock = CreateSemaphore(NULL,1,1,NULL);
+	preview = NULL;
+
 	// initialize video file name
 	strcpy(videoFileName,"test.avi");
+	strcpy(videoParamFileName,"");
 
 	// initialize buffer stuff to be empty
 	nFramesBuffer = 1000;
@@ -259,6 +276,10 @@ GigeRecord::GigeRecord(const char * cameraParamFileName, const char * experiment
 	if(!readExperimentParamFile()){
 		fprintf(stderr,"Error reading experiment parameter file\n");
 	}
+	if(previewUpdatePeriod > 0){
+		preview = new previewVideo(previewLock);
+	}
+
 }
 
 bool GigeRecord::readCameraParamFile(){
@@ -399,14 +420,40 @@ bool GigeRecord::initializeVideoWriter(){
 			fprintf(logFID,"Error allocating AVIwriter\n");
 			return false;
 		}
+		break;
 
 	case FMF:
 
 		FMFwriter = new fmfWriter();
-		return FMFwriter->startWrite(videoFileName,frameWidth,frameHeight,logFID);
+		if(FMFwriter == NULL){
+			fprintf(logFID,"Error allocating FMFwriter\n");
+			return false;
+		}
+		if(!FMFwriter->startWrite(videoFileName,frameWidth,frameHeight,logFID)){
+			fprintf(logFID,"Error starting FMF writing\n");
+			return false;
+		}
 
+		break;
 
 	case UFMF:
+
+		if(!strcmp(videoParamFileName,"")){
+			UFMFwriter = new ufmfWriter(videoFileName,frameWidth,frameHeight,logFID);
+		}
+		else{
+			UFMFwriter = new ufmfWriter(videoFileName,frameWidth,frameHeight,logFID,videoParamFileName);
+		}
+		if(UFMFwriter == NULL){
+			fprintf(logFID,"Error allocating UFMFwriter\n");
+			return false;
+		}
+		if(!UFMFwriter->startWrite()){
+			fprintf(logFID,"Error starting UFMF writing\n");
+			return false;
+		}
+
+		break;
 
 	default:
 
@@ -420,6 +467,7 @@ bool GigeRecord::initializeVideoWriter(){
 
 bool GigeRecord::closeVideoWriter(){
 
+	fprintf(stderr,"Closing video writer\n");
 	switch(videoFormat){
 		
 	case AVI:
@@ -429,12 +477,19 @@ bool GigeRecord::closeVideoWriter(){
 	}
 
 	cvReleaseVideoWriter(&AVIwriter);
+	break;
 
 	case FMF:
 
 		delete FMFwriter;
+		break;
 
 	case UFMF:
+
+		UFMFwriter->stopWrite();
+		fprintf(stderr,"stopped writing\n");
+		//delete UFMFwriter;
+		break;
 
 	default:
 
@@ -600,6 +655,13 @@ bool GigeRecord::initializeCamera(){
 		}
 	}
 
+	// get timestamp frequency to convert timestamps to seconds
+	errCode = PvAttrUint32Get(cameraHandle,"TimeStampFrequency",&timestampFrequency);
+	if(errCode){
+		fprintf(logFID,"Error %d getting TimeStampFrequency\n",errCode);
+		return false;
+	}
+
 	return true;
 
 }
@@ -629,7 +691,6 @@ void GigeRecord::printInfo(){
 // callback called when a frame is done
 void _STDCALL frameGrabbedCallback(tPvFrame* pFrame)
 {
-    //printf("[%03lu] Status = %02u, Timestamp = %u,%u\n",(unsigned long)pFrame->Context[0],pFrame->Status,pFrame->TimestampHi,pFrame->TimestampLo);
 	// if the frame was completed we re-enqueue it
 	GigeRecord * rec = (GigeRecord*)(pFrame->Context[0]);
 
@@ -637,6 +698,9 @@ void _STDCALL frameGrabbedCallback(tPvFrame* pFrame)
 		fprintf(stderr,"frameGrabbedCallback when rec is NULL\n");
 		return;
 	}
+
+	//fprintf(stderr,"[%03lu] Status = %02u, Timestamp = %u,%u\n",(unsigned long)pFrame->Context[0],pFrame->Status,pFrame->TimestampHi,pFrame->TimestampLo);
+
 
 	// removing something from the queue when this callback happens
 	rec->nFramesQueued--;
@@ -664,6 +728,10 @@ void _STDCALL frameGrabbedCallback(tPvFrame* pFrame)
 			fprintf(rec->logFID,"pFrame and pFrameBuffer[%d] do not match\n",i);
 		}
 
+		if(rec->preview && ((rec->nFramesGrabbed % rec->previewUpdatePeriod) == 0)){
+			rec->preview->setFrame(rec->imageBuffer[i],rec->nFramesGrabbed);
+		}
+
 		// more frames grabbed
 		rec->nFramesGrabbed++;
 
@@ -689,19 +757,28 @@ void _STDCALL frameGrabbedCallback(tPvFrame* pFrame)
 bool GigeRecord::processFrame(){
 
 	//char fileName[CHARARRAYSIZE];
+	unsigned __int64 timestampBoth;
+	double timestamp;
 
 	if(nFramesProcessable == 0){
 		return true;
 	}
 
 	// skip processing on this frame if we are behind
-	if(nFramesQueued > 1 || !isAcquiring){
+	if(nFramesQueueable > 1 || !isAcquiring){
 
 		//fprintf(logFID,"*******process start*******\n");
 
-		if((nFramesProcessed%30)==0){
+		if((nFramesProcessed%100)==0){
+			//fprintf(stderr,"Frame %llu\n",nFramesProcessed);
 			printInfo();
 		}
+
+		// convert timestamp to double
+		timestampBoth = (unsigned __int64)timestampHiBuffer[processableStart];
+		timestampBoth = timestampBoth << 32;
+		timestampBoth += (unsigned __int64)timestampLoBuffer[processableStart];
+		timestamp = (double)timestampBoth / (double)timestampFrequency;
 
 		switch(videoFormat){
 
@@ -713,13 +790,19 @@ bool GigeRecord::processFrame(){
 			//cvSaveImage(fileName,imageBuffer[processableStart]);
 			cvWriteFrame(AVIwriter,imageBuffer[processableStart]);
 			//cvWriteFrame(AVIwriter,colorImage);
+			break;
 
 		case FMF:
 
-			return FMFwriter->addFrame(imageBuffer[processableStart]->imageData,
-				timestampHiBuffer[processableStart],timestampLoBuffer[processableStart]);
+			if(!FMFwriter->addFrame(imageBuffer[processableStart]->imageData,timestamp))
+				return false;
+			break;
 
 		case UFMF:
+
+			if(!UFMFwriter->addFrame((unsigned char*)imageBuffer[processableStart]->imageData,timestamp,nFramesDropped,nFramesProcessable))
+				return false;
+			break;
 
 		default:
 
@@ -818,6 +901,8 @@ bool GigeRecord::startRecording(){
 		}
 	}
 
+	fprintf(stderr,"Finished recording\n");
+
 	// pause for 1 second
 	Sleep(1000);
 
@@ -852,6 +937,8 @@ bool GigeRecord::uninitializeCamera(){
 // stop streaming
 bool GigeRecord::stopRecording()
 {
+	fflush(logFID);
+	fprintf(stderr,"Stopping recording...\n");
     fprintf(logFID,"stopping streaming\n");
 	isAcquiring = false;
 
@@ -1072,8 +1159,24 @@ void GigeRecord::readExperimentAttribute(char* aLine)
 			else if(!strcmp(lLabel,"nFramesBuffer")){
 				nFramesBuffer = atof(lValue);
 			}
+			else if(!strcmp(lLabel,"videoFormat")){
+				if(!strcmp(lValue,"AVI"))
+					videoFormat = AVI;
+				else if(!strcmp(lValue,"FMF"))
+					videoFormat = FMF;
+				else if(!strcmp(lValue,"UFMF"))
+					videoFormat = UFMF;
+				else
+					fprintf(logFID,"Unknown video format %s\n",lValue);
+			}
+			else if(!strcmp(lLabel,"videoParamFileName")){
+				strcpy(videoParamFileName,lValue);
+			}
+			else if(!strcmp(lLabel,"previewUpdatePeriod")){
+				previewUpdatePeriod = atoi(lValue);
+			}
 			else{
-				fprintf(logFID,"Unknown experiment parameter %s\n",videoFileName);
+				fprintf(logFID,"Unknown experiment parameter %s\n",lLabel);
 			}
 		}
     }
@@ -1185,6 +1288,7 @@ int main(int argc, char* argv[]){
 		strcpy(logFileName,argv[3]);
 	}
 	else{
+		//strcpy(logFileName,"");
 		strcpy(logFileName,"C:\\Code\\imaq\\gige_record_x64\\out\\log.txt");
 	}
 

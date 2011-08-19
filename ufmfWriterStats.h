@@ -10,6 +10,10 @@
 #include <vector>
 #include "ufmfLogger.h"
 
+#ifndef MAX
+#define MAX(a,b)  ((a) < (b) ? (b) : (a))
+#endif
+
 #define BANDWIDTH_COMPUTATION_TIME_WINDOW_SEC 1
 #define NUM_FOREGROUND_BINS 3
 
@@ -23,18 +27,15 @@ typedef enum {
 	UTT_ADD_FRAME,
 	UTT_UPDATE_BACKGROUND,
 	UTT_COMPUTE_BACKGROUND, 
-	UTT_REWEIGHT_COUNTS,
 	UTT_WRITE_KEYFRAME,
 	UTT_COMPUTE_FRAME, 
 	UTT_WRITE_FRAME,
 	UTT_COMPUTE_STATS, 
-	UTT_WAIT_FOR_ADDED_FRAME,
-	UTT_WAIT_FOR_UNCOMPRESSED_FRAME_MANAGER,
 	UTT_WAIT_FOR_COMPRESS_THREAD,
 	UTT_WAIT_FOR_UNCOMPRESSED_FRAME,
 	UTT_WAIT_FOR_COMPRESSED_FRAME,
-	UTT_NUM_TIMINGS,
-	UTT_STOP_WRITE
+	UTT_STOP_WRITE,
+	UTT_NUM_TIMINGS
 } ufmfTimingType;
 
 typedef struct {
@@ -106,7 +107,8 @@ public:
 		logger->log(UFMF_DEBUG_3, "streamStart\n"); 
 		logger->log(UFMF_DEBUG_3, "frame,nFramesBuffered,timestamp,isCompressed,FPS,nFramesDropped,bytes,nForegroundPx,nPxWritten,nBoxes,meanPixelError,maxPixelError,maxFilterError");
 		if(statPrintTimings){
-			logger->log(UFMF_DEBUG_3,",writeHeaderTime,writeFooterTime,updateBackgroundTime,computeBackgroundTime,reweightCountsTime,writeKeyFrameTime,computeFrameTime,writeFrameTime,computeStatisticsTime,waitForFrameCaptureTime");
+			                      // START_WRITING,    WRITE_HEADER,   WRITE_FOOTER,   ADD_FRAME,   UPDATE_BACKGROUND,   COMPUTE_BACKGROUND,   WRITE_KEYFRAME,   COMPUTE_FRAME,    WRITE_FRAME,   COMPUTE_STATS,       WAIT_FOR_COMPRESS_THREAD,     WAIT_FOR_UNCOMPRESSED_FRAME, WAIT_FOR_COMPRESSED_FRAME, UTT_STOP_WRITE
+			logger->log(UFMF_DEBUG_3,",startWritingTime,writeHeaderTime,writeFooterTime,addFrameTime,updateBackgroundTime,computeBackgroundTime,writeKeyFrameTime,compressFrameTime,writeFrameTime,computeStatisticsTime,waitForCompressionThreadTime,waitForUncompressedFrameTime,waitForCompressedFrameTime,stopWritingTime");
 		}
 		logger->log(UFMF_DEBUG_3,"\n");
 	}
@@ -123,7 +125,8 @@ public:
 			logger->log(UFMF_DEBUG_0,",meanMeanPixelError,stdMeanPixelError,maxMeanPixelError,meanMaxPixelError,stdMaxPixelError,maxMaxPixelError,meanMaxFilterError,stdMaxFilterError,maxMaxFilterError");
 		}
 		if(statPrintTimings){
-			logger->log(UFMF_DEBUG_0,",meanWriteHeaderTime,maxWriteHeaderTime,nWriteHeaderCalls,meanWriteFooterTime,maxWriteFooterTime,nWriteFooterCalls,meanUpdateBackgroundTime,maxUpdateBackgroundTime,nUpdateBackgroundCalls,meanComputeBackgroundTime,maxComputeBackgroundTime,nComputeBackgroundCalls,meanReweightCountsTime,maxReweightCountsTime,nReweightCountsCalls,meanWriteKeyFrameTime,maxWriteKeyFrameTime,nWriteKeyFrameCalls,meanComputeFrameTime,maxComputeFrameTime,nComputeFrameCalls,meanWriteFrameTime,maxWriteFrameTime,nWriteFrameCalls,meanComputeStatisticsTime,maxComputeStatisticsTime,nComputeStatisticsCalls,meanWaitForFrameCaptureTime,maxWaitForFrameCaptureTime,nWaitForFrameCaptureCalls");
+			//                         startWritingTime,                                           writeHeaderTime,                                         writeFooterTime,                                         addFrameTime,                                   updateBackgroundTime,                                                   computeBackgroundTime,                                                     writeKeyFrameTime,                                             compressFrameTime,                                             writeFrameTime,                                       computeStatisticsTime,                                                     waitForCompressionThreadTime,                                                                   waitForUncompressedFrameTime,                                                                   waitForCompressedFrameTime,                                                               stopWritingTime
+			logger->log(UFMF_DEBUG_0,",meanStartWritingTime,maxStartWritingTime,nStartWritingCalls,meanWriteHeaderTime,maxWriteHeaderTime,nWriteHeaderCalls,meanWriteFooterTime,maxWriteFooterTime,nWriteFooterCalls,meanAddFrameTime,maxAddFrameTime,nAddFrameCalls,meanUpdateBackgroundTime,maxUpdateBackgroundTime,nUpdateBackgroundCalls,meanComputeBackgroundTime,maxComputeBackgroundTime,nComputeBackgroundCalls,meanWriteKeyFrameTime,maxWriteKeyFrameTime,nWriteKeyFrameCalls,meanCompressFrameTime,maxCompressFrameTime,nCompressFrameCalls,meanWriteFrameTime,maxWriteFrameTime,nWriteFrameCalls,meanComputeStatisticsTime,maxComputeStatisticsTime,nComputeStatisticsCalls,meanWaitForCompressionThreadTime,maxWaitForCompressionThreadTime,nWaitForCompressionThreadCalls,meanWaitForUncompressedFrameTime,maxWaitForUncompressedFrameTime,nWaitForUncompressedFrameCalls,meanWaitForCompressedFrameTime,maxWaitForCompressedFrameTime,nWaitForCompressedFrameCalls,meanStopWritingTime,maxStopWritingTime,nStopWritingCalls");
 		}
 		logger->log(UFMF_DEBUG_0,"\n");
 	}
@@ -144,7 +147,16 @@ public:
 
 	~ufmfWriterStats() {
 		freeBuffers();
-		if(freeLogger) delete logger;
+		if(freeLogger){
+			delete logger;
+			logger = NULL;
+		}
+	}
+
+	void flushNow(){
+		if(logger){
+			logger->flushNow();
+		}
 	}
 
 	void clear() {
@@ -173,9 +185,9 @@ public:
 		lastFPS = -1.0;
 		lastSPF = -1.0;
 
-
-		const char *updateNames[UTT_NUM_TIMINGS] = { "none", "Write Header", "Write Footer", "Update Background", "Compute Background", 
-													 "Write Key Frame", "Compute Frame", "Write Frame", "Compute Statistics", "Wait For Frame Capture" };
+		const char *updateNames[UTT_NUM_TIMINGS] = { "none", "Start Writing", "Write Header", "Write Footer", "Add Frame", "Update Background", "Compute Background", 
+													 "Write Key Frame", "Compress Frame", "Write Frame", "Compute Statistics", "Wait For Compression Thread", 
+													 "Wait For Uncompressed Frame", "Wait For Compressed Frame", "Stop Writing" };
 		for(int i = 0; i < UTT_NUM_TIMINGS; i++) {
 			timings[i].sum = timings[i].maxDur = timings[i].lastDur = 0;
 			timings[i].num = 0;
@@ -223,7 +235,7 @@ public:
 	
 	// Call this on every frame written to update stats
 	void update(std::vector<__int64> &index, std::vector<double> &index_timestamp, _int64 frameSize, bool isCompressedFrame, int numForeground, int numWritten, int numBoxes, 
-				int numBuffered, unsigned int numDropped, unsigned short *nWrites, int numPixels, unsigned __int8 *frame, float *background, 
+				unsigned __int64 numBuffered, unsigned __int64 numDropped, unsigned short *nWrites, int numPixels, unsigned __int8 *frame, float *background, 
 				ufmfDebugLevel level) {
 
 		if(numFrames == 0 && index_timestamp.size() > 0) { startTime = index_timestamp[0]; }
@@ -414,11 +426,11 @@ public:
 
 		if(logger && streamPrintFreq && (numFrames%streamPrintFreq == 0)) { 
 			if(printDebugMode){
-				logger->log(level, "ufmf frame %d: buffered=%d, timestamp=%f, is_compressed=%d, fps=%f, bytes=%d, foreground_pixels=%d, num_pixels_written=%d, num_boxes=%d, lastAveErr=%f, lastMaxPxErr=%f, lastMaxFiltErr=%f\n", 
-					(int)numFrames, numBuffered, currTime, (int)isCompressedFrame, lastFPS, (int)frameSize, numForeground, numWritten, numBoxes, (float)lastAveErr, (float)lastMaxPxErr, (float)(lastMaxFiltErr/filterZ)); 
+				logger->log(level, "ufmf frame %d: buffered=%llu, dropped=%llu, timestamp=%f, is_compressed=%d, fps=%f, bytes=%d, foreground_pixels=%d, num_pixels_written=%d, num_boxes=%d, lastAveErr=%f, lastMaxPxErr=%f, lastMaxFiltErr=%f\n", 
+					(int)numFrames, numBuffered, numDropped, currTime, (int)isCompressedFrame, lastFPS, (int)frameSize, numForeground, numWritten, numBoxes, (float)lastAveErr, (float)lastMaxPxErr, (float)(lastMaxFiltErr/filterZ)); 
 			}
 			else{
-				logger->log(level, "%d,%d,%f,%d,%f,%d,%d,%d,%d,%d,%f,%f,%f",
+				logger->log(level, "%d,%llu,%f,%d,%f,%llu,%d,%d,%d,%d,%f,%f,%f",
 					(int)numFrames, numBuffered, currTime, (int)isCompressedFrame, lastFPS, (int)numDropped, (int)frameSize, numForeground, numWritten, numBoxes, (float)lastAveErr, (float)lastMaxPxErr, (float)(lastMaxFiltErr/filterZ));
 			}
 			if(statPrintTimings){
@@ -525,24 +537,24 @@ public:
 	void print(ufmfDebugLevel level) {
 		char str[5000], tmp[5000];
 		double muFPS = sumFPS / (double)(numFrames-1);
-		sigFPS = sqrt( sumFPSSquared / (numFrames-1) - muFPS*muFPS );
+		sigFPS = sqrt(MAX(0,sumFPSSquared / (double)(numFrames-1) - muFPS*muFPS));
 		double meanFrameSizeBytes;
 		meanFrameSizeBytes = sumFrameSizeBytes/(double)numFrames;
-		double stdFrameSizeBytes = sqrt( sumFrameSizeBytesSquared / (double)numFrames - meanFrameSizeBytes*meanFrameSizeBytes );
+		double stdFrameSizeBytes = sqrt( MAX(0,sumFrameSizeBytesSquared / (double)numFrames - meanFrameSizeBytes*meanFrameSizeBytes) );
 		double compressionRate;
 		compressionRate = meanFrameSizeBytes / (double)numPixels;
 		double meanForegroundPixels = (sumForegroundPixels/(double)nFramesBackSub);
-		double stdForegroundPixels = sqrt( sumForegroundPixelsSquared / (double)nFramesBackSub - meanForegroundPixels*meanForegroundPixels );
+		double stdForegroundPixels = sqrt( MAX(0,sumForegroundPixelsSquared / (double)nFramesBackSub - meanForegroundPixels*meanForegroundPixels) );
 		double meanNumWritten = (sumNumWritten/(double)nFramesCompressed);
-		double stdNumWritten = sqrt( sumNumWrittenSquared / (double)nFramesCompressed - meanNumWritten*meanNumWritten );
+		double stdNumWritten = sqrt( MAX(0,sumNumWrittenSquared / (double)nFramesCompressed - meanNumWritten*meanNumWritten) );
 		double meanNumBoxes = (sumNumBoxes/(double)nFramesCompressed);
-		double stdNumBoxes = sqrt( sumNumBoxesSquared / (double)nFramesCompressed - meanNumBoxes*meanNumBoxes );
+		double stdNumBoxes = sqrt( MAX(0,sumNumBoxesSquared / (double)nFramesCompressed - meanNumBoxes*meanNumBoxes) );
 		double meanAverageErr = (sumAverageErr/(double)nFramesComputeFrameError);
-		double stdAverageErr = sqrt( sumAverageErrSquared / (double)nFramesComputeFrameError - meanAverageErr*meanAverageErr );
+		double stdAverageErr = sqrt( MAX(0,sumAverageErrSquared / (double)nFramesComputeFrameError - meanAverageErr*meanAverageErr) );
 		double meanMaxPxErr = (sumMaxPxErr/(double)nFramesComputeFrameError);
-		double stdMaxPxErr = sqrt( sumMaxPxErrSquared / (double)nFramesComputeFrameError - meanMaxPxErr*meanMaxPxErr );
+		double stdMaxPxErr = sqrt( MAX(0,sumMaxPxErrSquared / (double)nFramesComputeFrameError - meanMaxPxErr*meanMaxPxErr) );
 		double meanFilteredErr = sumFilteredErr/(double)nFramesComputeFrameError;
-		double stdFilteredErr = sqrt( sumFilteredErrSquared / (double)nFramesComputeFrameError - meanFilteredErr*meanFilteredErr );
+		double stdFilteredErr = sqrt( MAX(0,sumFilteredErrSquared / (double)nFramesComputeFrameError - meanFilteredErr*meanFilteredErr) );
 
 		if(printDebugMode){
 			sprintf(str, "num_frames=%u, num_dropped=%u, num_frames_raw=%u, num_frames_nobacksub=%u, fps=(%f ave, %f std, %f max, %f min), bandwidth=(%f KB/s ave, %f KB/s peak), frame_size=(%f KB ave, %f std, %f KB peak), compression_rate=%f, foreground_pixels=(%f ave, %f std, %f peak), num_pixels_written=(%f ave, %f std, %f peak), num_boxes=(%f ave, %f std, %f peak)", 
@@ -616,7 +628,7 @@ public:
 		//sumAverageErr = maxAverageErr = sumFilteredErr = maxFilteredErr = 0;
 
 	}
-	void printSummary(ufmfDebugLevel level){
+	void printSummary(ufmfDebugLevel level=UFMF_DEBUG_0){
 		if(!printDebugMode){
 			if(streamPrintFreq>0){
 				printStreamFooter();
